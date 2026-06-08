@@ -1,0 +1,41 @@
+# Build output
+build/
+build-lint/
+build-sanitize/
+
+# X-Plane SDK headers (downloaded by `make setup`)
+sdk/
+
+# Vendor dependencies (downloaded by `make setup`)
+vendor/
+
+# macOS
+.DS_Store
+.cache/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Visual Studio / MSVC
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+.vs/
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# VS Code
+.vscode/
+
+# CLion / CMake
+.idea/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+
+# Claude Code
+.claude/
