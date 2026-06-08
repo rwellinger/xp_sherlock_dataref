@@ -1,0 +1,165 @@
+name: Build
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y clang clang-tidy libgl-dev unzip curl
+
+      - name: Setup dependencies
+        run: make setup
+
+      - name: Configure (generate compile_commands.json)
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -Wno-dev
+
+      - name: Run clang-tidy
+        run: clang-tidy -p build src/*.cpp
+
+  test:
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: sudo apt-get update -q && sudo apt-get install -y libgl-dev
+
+      - name: Setup dependencies
+        run: make setup
+
+      - name: Build + run unit tests
+        run: make test
+
+  build-macos:
+    needs: [lint]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup dependencies
+        run: make setup
+
+      - name: Build
+        run: |
+          RELEASE_FLAG=""
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then RELEASE_FLAG="-DRELEASE=ON"; fi
+          cmake -B build -DCMAKE_BUILD_TYPE=Release $RELEASE_FLAG -Wno-dev
+          cmake --build build --parallel
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xp_sherlock_dataref-macos
+          path: build/xp_sherlock_dataref.xpl
+
+  build-linux:
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: sudo apt-get update -q && sudo apt-get install -y libgl-dev
+
+      - name: Setup dependencies
+        run: make setup
+
+      - name: Build
+        run: |
+          RELEASE_FLAG=""
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then RELEASE_FLAG="-DRELEASE=ON"; fi
+          cmake -B build -DCMAKE_BUILD_TYPE=Release $RELEASE_FLAG -Wno-dev
+          cmake --build build --parallel
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xp_sherlock_dataref-linux
+          path: build/xp_sherlock_dataref.xpl
+
+  build-windows:
+    needs: [lint]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install make
+        run: choco install make --no-progress -y
+
+      - name: Setup dependencies
+        shell: bash
+        run: make setup
+
+      - name: Build
+        shell: bash
+        run: |
+          RELEASE_FLAG=""
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then RELEASE_FLAG="-DRELEASE=ON"; fi
+          cmake -B build -A x64 $RELEASE_FLAG
+          cmake --build build --config Release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xp_sherlock_dataref-windows
+          path: build/Release/xp_sherlock_dataref.xpl
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test, build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: xp_sherlock_dataref-macos
+          path: dist/macos
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: xp_sherlock_dataref-linux
+          path: dist/linux
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: xp_sherlock_dataref-windows
+          path: dist/windows
+
+      - name: Build ZIP
+        run: |
+          mkdir -p dist/xp_sherlock_dataref/mac_x64
+          mkdir -p dist/xp_sherlock_dataref/lin_x64
+          mkdir -p dist/xp_sherlock_dataref/win_x64
+          cp dist/macos/xp_sherlock_dataref.xpl   dist/xp_sherlock_dataref/mac_x64/xp_sherlock_dataref.xpl
+          cp dist/linux/xp_sherlock_dataref.xpl   dist/xp_sherlock_dataref/lin_x64/xp_sherlock_dataref.xpl
+          cp dist/windows/xp_sherlock_dataref.xpl dist/xp_sherlock_dataref/win_x64/xp_sherlock_dataref.xpl
+          cd dist && zip -r xp_sherlock_dataref.zip xp_sherlock_dataref/
+
+      - name: Create release with assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/xp_sherlock_dataref.zip
+          generate_release_notes: true
