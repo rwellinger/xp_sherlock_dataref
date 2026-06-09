@@ -3,6 +3,8 @@
 An X-Plane 12 plugin that finds the `sim/...` DataRef driving a cockpit switch
 **by behavioural correlation**, not by name.
 
+![DataRef Detective — Inspect phase](detectiv_1.jpg)
+
 ## Why
 
 Some payware aircraft (e.g. **AOA Simulations T-6A Texan II**) do not register
