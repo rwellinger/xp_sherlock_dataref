@@ -35,6 +35,13 @@ void rebuild();
 bool                           is_built();
 const std::vector<LogicalRef> &all();
 
+// User-configurable exclusion prefixes, applied at the next rebuild().
+// Any DataRef whose name starts with one of these strings is dropped during
+// enumeration — same mechanism as the hardcoded sim/private/ filter, but
+// driven by the UI. The hardcoded filter remains in force independently.
+void                            set_user_exclusions(std::vector<std::string> prefixes);
+const std::vector<std::string> &user_exclusions();
+
 // Read a single logical ref's current value. Returns false on null handle.
 bool read(const LogicalRef &lr, SampleValue &out);
 

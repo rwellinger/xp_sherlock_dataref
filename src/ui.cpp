@@ -55,6 +55,44 @@ bool        s_last_write_done    = false;
 bool        s_last_write_writable = false;
 SampleValue s_last_readback      = {};
 
+// ── Snapshot exclusion filters (checkboxes) ──────────────────────────────────
+//
+// Each category maps to one or two namespace prefixes that are stripped at
+// enumeration time. Defaults skip the noisiest namespaces that almost never
+// hold cockpit switches (flight model state, weather, joystick raw input,
+// etc.) so a fresh user can take a useful snapshot without tuning anything.
+// Cockpit-relevant namespaces (sim/cockpit*, laminar/*, aircraft-specific)
+// are deliberately never on this list.
+struct ExclusionCategory
+{
+    const char *label;
+    const char *prefix_a; // primary prefix
+    const char *prefix_b; // optional second prefix, "" if unused
+    bool        default_on;
+};
+
+constexpr ExclusionCategory s_exclusion_categories[] = {
+    {"Flight model (positions, velocities, forces)", "sim/flightmodel/", "sim/flightmodel2/", true},
+    {"Aircraft static config",                       "sim/aircraft/",    "",                  true},
+    {"Weather & atmosphere",                         "sim/weather/",     "sim/atmosphere/",   true},
+    {"Joystick raw input",                           "sim/joystick/",    "",                  true},
+    {"Network / multiplayer",                        "sim/network/",     "sim/multiplayer/",  true},
+    {"World / terrain",                              "sim/world/",       "",                  true},
+    {"Version info",                                 "sim/version/",     "",                  true},
+    {"Test scaffolding",                             "sim/test/",        "",                  true},
+    {"Time",                                         "sim/time/",        "",                  false},
+    {"Graphics / rendering",                         "sim/graphics/",    "",                  false},
+    {"Operation",                                    "sim/operation/",   "",                  false},
+};
+constexpr std::size_t s_exclusion_category_count =
+    sizeof(s_exclusion_categories) / sizeof(s_exclusion_categories[0]);
+
+bool s_exclude_flags[s_exclusion_category_count] = {}; // initialised in init()
+bool s_filters_dirty = true; // forces rebuild() before first snapshot, then per-toggle
+
+// ── Result filter (live substring filter on candidate table) ─────────────────
+char s_result_filter[128] = "";
+
 // ── Capture-window callbacks ─────────────────────────────────────────────────
 //
 // Critical: the invisible XPLM window is full-screen, so without filtering it
@@ -148,17 +186,21 @@ void KeyCallback(XPLMWindowID, char key, XPLMKeyFlags flags, char vkey, void *, 
 {
     if (losing_focus)
         return;
-    if (!(flags & xplm_DownFlag))
-        return;
     ImGui::SetCurrentContext(s_imgui_ctx);
     ImGuiIO &io = ImGui::GetIO();
 
+    bool down = (flags & xplm_DownFlag) != 0;
+    bool up   = (flags & xplm_UpFlag) != 0;
+
     // Escape always closes our window regardless of focus — convenience.
-    if (vkey == XPLM_VK_ESCAPE)
+    if (down && vkey == XPLM_VK_ESCAPE)
     {
         s_open = false;
         if (s_wnd)
+        {
             XPLMSetWindowIsVisible(s_wnd, 0);
+            XPLMTakeKeyboardFocus(nullptr); // hand keys back to X-Plane
+        }
         return;
     }
 
@@ -167,14 +209,48 @@ void KeyCallback(XPLMWindowID, char key, XPLMKeyFlags flags, char vkey, void *, 
     if (!io.WantCaptureKeyboard)
         return;
 
-    if (key >= 32 && key < 127)
+    // Printable characters: only emit on key-down. Releases don't generate
+    // text, so we must not call AddInputCharacter for them or every key would
+    // be typed twice.
+    if (down && key >= 32 && key < 127)
         io.AddInputCharacter(static_cast<unsigned>(key));
-    if (vkey == XPLM_VK_BACK)
-        io.AddKeyEvent(ImGuiKey_Backspace, true);
-    if (vkey == XPLM_VK_DELETE)
-        io.AddKeyEvent(ImGuiKey_Delete, true);
-    if (vkey == XPLM_VK_RETURN)
-        io.AddKeyEvent(ImGuiKey_Enter, true);
+
+    // For non-character keys ImGui needs both edges (down AND up). Without the
+    // matching key-up event ImGui's internal repeat state can latch and the
+    // key appears to be held down forever — symptom: backspace deletes the
+    // whole field instead of one char.
+    auto edge = [&](ImGuiKey k) {
+        if (down) io.AddKeyEvent(k, true);
+        if (up)   io.AddKeyEvent(k, false);
+    };
+    if (vkey == XPLM_VK_BACK)   edge(ImGuiKey_Backspace);
+    if (vkey == XPLM_VK_DELETE) edge(ImGuiKey_Delete);
+    if (vkey == XPLM_VK_RETURN) edge(ImGuiKey_Enter);
+    if (vkey == XPLM_VK_LEFT)   edge(ImGuiKey_LeftArrow);
+    if (vkey == XPLM_VK_RIGHT)  edge(ImGuiKey_RightArrow);
+    if (vkey == XPLM_VK_HOME)   edge(ImGuiKey_Home);
+    if (vkey == XPLM_VK_END)    edge(ImGuiKey_End);
+    if (vkey == XPLM_VK_TAB)    edge(ImGuiKey_Tab);
+}
+
+// Synchronise XPLM keyboard focus with ImGui's active text-input state.
+//
+// XPLM only routes keystrokes to handleKeyFunc when our window holds the
+// keyboard focus. Without this, clicking into an ImGui InputText looks
+// active visually (cursor blinks) but no characters arrive. We grab focus
+// the frame ImGui starts wanting text input, and release it the frame the
+// user clicks away — so X-Plane's own key bindings (e.g. 'b' for brakes)
+// keep working whenever no Detective text field is active.
+void sync_keyboard_focus(const ImGuiIO &io)
+{
+    if (!s_wnd)
+        return;
+    bool wants = io.WantTextInput;
+    bool has   = XPLMHasKeyboardFocus(s_wnd) != 0;
+    if (wants && !has)
+        XPLMTakeKeyboardFocus(s_wnd);
+    else if (!wants && has)
+        XPLMTakeKeyboardFocus(nullptr);
 }
 
 void create_capture_window_if_needed()
@@ -222,7 +298,7 @@ std::string hint_text(Phase p)
     case Phase::Idle:
         return "Sit still. Take a snapshot to learn what's noisy.";
     case Phase::Baseline:
-        return "Hold still — building noise ignore-set...";
+        return "Hold still - building noise ignore-set...";
     case Phase::Record:
         if (recorder::auto_stop_enabled())
             return "Flip the switch THREE times (e.g. ON-OFF-ON). Click 'I Acted Now' before each flip. "
@@ -269,7 +345,88 @@ const char *direction_icon(const Candidate &c)
     return "?";
 }
 
+// ── Filter helpers ───────────────────────────────────────────────────────────
+std::vector<std::string> collect_active_prefixes()
+{
+    std::vector<std::string> out;
+    out.reserve(s_exclusion_category_count * 2);
+    for (std::size_t i = 0; i < s_exclusion_category_count; ++i)
+    {
+        if (!s_exclude_flags[i])
+            continue;
+        const auto &cat = s_exclusion_categories[i];
+        if (cat.prefix_a && cat.prefix_a[0])
+            out.emplace_back(cat.prefix_a);
+        if (cat.prefix_b && cat.prefix_b[0])
+            out.emplace_back(cat.prefix_b);
+    }
+    return out;
+}
+
+// Case-insensitive substring search. Used for the live result-filter — keeps
+// the hot path cheap (no regex, no allocations per row).
+bool path_matches(const std::string &path, const char *needle)
+{
+    if (!needle || needle[0] == '\0')
+        return true;
+    // Fast bail-out: needle longer than path can never match.
+    std::size_t nlen = std::strlen(needle);
+    if (nlen > path.size())
+        return false;
+    for (std::size_t i = 0; i + nlen <= path.size(); ++i)
+    {
+        std::size_t k = 0;
+        for (; k < nlen; ++k)
+        {
+            char a = path[i + k];
+            char b = needle[k];
+            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+            if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+            if (a != b)
+                break;
+        }
+        if (k == nlen)
+            return true;
+    }
+    return false;
+}
+
 // ── UI body ──────────────────────────────────────────────────────────────────
+void draw_snapshot_filters()
+{
+    if (!ImGui::CollapsingHeader("Snapshot filters (exclude noisy namespaces)"))
+        return;
+
+    ImGui::TextDisabled("Skipped at enumeration - applied on the next 'Take Snapshot'.");
+    ImGui::Spacing();
+
+    // Two-column layout keeps the block compact even with ~11 categories.
+    const float col_width = 360.f;
+    if (ImGui::BeginTable("excl", 2, ImGuiTableFlags_SizingFixedFit))
+    {
+        ImGui::TableSetupColumn("a", ImGuiTableColumnFlags_WidthFixed, col_width);
+        ImGui::TableSetupColumn("b", ImGuiTableColumnFlags_WidthFixed, col_width);
+        for (std::size_t i = 0; i < s_exclusion_category_count; ++i)
+        {
+            if ((i % 2) == 0)
+                ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            char id[64];
+            snprintf(id, sizeof(id), "%s##ex%zu", s_exclusion_categories[i].label, i);
+            bool before = s_exclude_flags[i];
+            if (ImGui::Checkbox(id, &s_exclude_flags[i]) && s_exclude_flags[i] != before)
+                s_filters_dirty = true;
+        }
+        ImGui::EndTable();
+    }
+
+    if (s_filters_dirty)
+    {
+        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
+                           "Snapshot will re-enumerate to apply filter changes.");
+    }
+}
+
 void draw_status_bar()
 {
     auto st = recorder::status();
@@ -316,6 +473,16 @@ void draw_button_row()
     ImGui::BeginDisabled(!can_baseline);
     if (ImGui::Button("Take Snapshot"))
     {
+        // Re-enumerate first if exclusion filters have changed since the last
+        // index build. Doing it here (rather than inside start_baseline) keeps
+        // the filter logic owned by the UI layer and the recorder ignorant of
+        // it. start_baseline() will pick up the freshly-built index.
+        if (s_filters_dirty)
+        {
+            dataref_index::set_user_exclusions(collect_active_prefixes());
+            dataref_index::rebuild();
+            s_filters_dirty = false;
+        }
         s_selected_candidate = -1;
         recorder::start_baseline(2.5f);
     }
@@ -356,7 +523,9 @@ void draw_button_row()
     if (ImGui::Button("Re-enumerate"))
     {
         s_selected_candidate = -1;
+        dataref_index::set_user_exclusions(collect_active_prefixes());
         dataref_index::rebuild();
+        s_filters_dirty = false;
     }
 
     // Mode row
@@ -399,7 +568,7 @@ void draw_candidates_table()
         {
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
-                               "No correlating DataRef found — likely Command-based or internal aircraft logic.");
+                               "No correlating DataRef found - likely Command-based or internal aircraft logic.");
             ImGui::TextWrapped("The switch may fire an X-Plane Command without writing a DataRef, or the aircraft's "
                                "SASL/Lua logic may handle it entirely in-process. Command sniffing is not implemented "
                                "in v1.");
@@ -414,6 +583,22 @@ void draw_candidates_table()
 
     ImGui::Spacing();
     ImGui::Text("Candidates: %zu", cands.size());
+
+    // Live substring filter on the path column. The displayed Rank stays the
+    // true index in cands[], so hidden rows never push visible rows into a
+    // different number — this is what keeps Copy path / Copy code snippet
+    // unambiguous when something is filtered out.
+    ImGui::SetNextItemWidth(300.f);
+    ImGui::InputTextWithHint("##resultfilter", "Filter by keyword (e.g. cockpit)",
+                             s_result_filter, sizeof(s_result_filter));
+    ImGui::SameLine();
+    ImGui::TextDisabled("(case-insensitive substring on path)");
+    if (s_result_filter[0] != '\0')
+    {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear##rf"))
+            s_result_filter[0] = '\0';
+    }
 
     ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                             ImGuiTableFlags_Resizable;
@@ -435,6 +620,13 @@ void draw_candidates_table()
             const Candidate &c   = cands[i];
             const LogicalRef *lr = recorder::logical_ref_at(c.logical_ref_idx);
             if (!lr)
+                continue;
+
+            // Hide rows that don't match the live filter. `i` is kept as-is —
+            // both the Rank column and s_selected_candidate must reflect the
+            // true position in cands[], otherwise Copy path would lie about
+            // which row was actually selected.
+            if (s_result_filter[0] != '\0' && !path_matches(lr->display_path, s_result_filter))
                 continue;
 
             ImGui::TableNextRow();
@@ -487,20 +679,34 @@ void draw_candidates_table()
         ImGui::EndTable();
     }
 
-    // Per-row action buttons under the table (work on s_selected_candidate)
+    // Per-row action buttons under the table (work on s_selected_candidate).
+    // If the selected row is currently filtered out, hide the action block so
+    // the user can't accidentally copy a path that isn't visible. Selection
+    // state is preserved across filter changes — clearing the filter brings
+    // the row (and its action buttons) back without losing context.
     if (s_selected_candidate >= 0 && s_selected_candidate < static_cast<int>(cands.size()))
     {
         const Candidate &c   = cands[s_selected_candidate];
         const LogicalRef *lr = recorder::logical_ref_at(c.logical_ref_idx);
         if (lr)
         {
-            ImGui::Spacing();
-            ImGui::TextDisabled("Selected: %s", lr->display_path.c_str());
-            if (ImGui::Button("Copy path"))
-                clipboard::copy(lr->display_path);
-            ImGui::SameLine();
-            if (ImGui::Button("Copy code snippet"))
-                clipboard::copy(dataref_index::code_snippet(*lr));
+            bool selection_visible =
+                (s_result_filter[0] == '\0') || path_matches(lr->display_path, s_result_filter);
+            if (selection_visible)
+            {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Selected: %s", lr->display_path.c_str());
+                if (ImGui::Button("Copy path"))
+                    clipboard::copy(lr->display_path);
+                ImGui::SameLine();
+                if (ImGui::Button("Copy code snippet"))
+                    clipboard::copy(dataref_index::code_snippet(*lr));
+            }
+            else
+            {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Selected ref is hidden by the filter - clear the filter to act on it.");
+            }
         }
     }
 }
@@ -516,9 +722,14 @@ void draw_test_panel()
     if (!lr)
         return;
 
+    // Don't render the test panel while the selected ref is hidden by the
+    // active result filter — same rationale as the Copy-button guard above.
+    if (s_result_filter[0] != '\0' && !path_matches(lr->display_path, s_result_filter))
+        return;
+
     ImGui::Spacing();
     ImGui::Separator();
-    ImGui::Text("Test panel — write value to candidate");
+    ImGui::Text("Test panel - write value to candidate");
 
     ImGui::Text("Writable (XPLMCanWriteDataRef): %s", lr->is_writable ? "YES" : "NO");
     if (!lr->is_writable)
@@ -568,7 +779,7 @@ void draw_test_panel()
     }
 
     ImGui::TextWrapped("Write executed (or refused). If the cockpit shows no reaction, the DataRef may still be the "
-                       "correct one but is read-only, or the aircraft's own logic overwrites it every frame — in that "
+                       "correct one but is read-only, or the aircraft's own logic overwrites it every frame - in that "
                        "case it cannot be driven from outside; look for an associated Command instead.");
 }
 
@@ -594,6 +805,12 @@ void init()
 
     ImGui_ImplOpenGL2_Init();
     s_last_frame_time = get_xp_time();
+
+    // Seed exclusion checkboxes from the per-category defaults. s_filters_dirty
+    // stays true so the first Take Snapshot rebuilds the index with these
+    // filters applied (otherwise rebuild() never runs and defaults are no-op).
+    for (std::size_t i = 0; i < s_exclusion_category_count; ++i)
+        s_exclude_flags[i] = s_exclusion_categories[i].default_on;
 }
 
 void stop()
@@ -686,6 +903,7 @@ void draw()
         {
             draw_status_bar();
             ImGui::Separator();
+            draw_snapshot_filters();
             draw_button_row();
             ImGui::Separator();
             draw_candidates_table();
@@ -694,8 +912,13 @@ void draw()
         ImGui::End();
         s_open = open;
         if (!s_open && s_wnd)
+        {
             XPLMSetWindowIsVisible(s_wnd, 0);
+            XPLMTakeKeyboardFocus(nullptr);
+        }
     }
+
+    sync_keyboard_focus(io);
 
     ImGui::Render();
     ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
@@ -714,7 +937,10 @@ void toggle()
     {
         s_open = false;
         if (s_wnd)
+        {
             XPLMSetWindowIsVisible(s_wnd, 0);
+            XPLMTakeKeyboardFocus(nullptr);
+        }
         return;
     }
     create_capture_window_if_needed();

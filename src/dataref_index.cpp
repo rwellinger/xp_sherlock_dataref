@@ -9,8 +9,9 @@ namespace xp_sherlock
 namespace
 {
 
-std::vector<LogicalRef> s_index;
-bool                    s_built = false;
+std::vector<LogicalRef>  s_index;
+bool                     s_built = false;
+std::vector<std::string> s_user_exclusions;
 
 // Pick a single canonical type for a multi-typed ref. Some refs report
 // Int|Float|Double; we pick the most-specific that we support, in this
@@ -57,12 +58,13 @@ void rebuild()
 
     s_index.reserve(static_cast<std::size_t>(total));
 
-    int skipped_data    = 0;
-    int skipped_unknown = 0;
-    int skipped_private = 0;
-    int multi_typed     = 0;
-    int expanded_arrays = 0;
-    int total_logical   = 0;
+    int skipped_data          = 0;
+    int skipped_unknown       = 0;
+    int skipped_private       = 0;
+    int skipped_user_excluded = 0;
+    int multi_typed           = 0;
+    int expanded_arrays       = 0;
+    int total_logical         = 0;
 
     char name_buf[1024];
 
@@ -103,6 +105,28 @@ void rebuild()
         {
             ++skipped_private;
             continue;
+        }
+
+        // User-configured prefix exclusions (Snapshot filter checkboxes).
+        // Same shape as the sim/private/ check above — substring match anchored
+        // at position 0. Kept as a separate pass so the hardcoded filter and
+        // the user filter are independently observable in the log banner.
+        {
+            bool user_drop = false;
+            for (const auto &px : s_user_exclusions)
+            {
+                if (!px.empty() && name.size() >= px.size() &&
+                    std::strncmp(name.c_str(), px.c_str(), px.size()) == 0)
+                {
+                    user_drop = true;
+                    break;
+                }
+            }
+            if (user_drop)
+            {
+                ++skipped_user_excluded;
+                continue;
+            }
         }
 
         // Skip byte/string refs in v1 (logged once at the end).
@@ -178,13 +202,13 @@ void rebuild()
              total, total_logical, expanded_arrays, multi_typed);
     XPLMDebugString(banner);
 
-    if (skipped_data || skipped_unknown || skipped_private)
+    if (skipped_data || skipped_unknown || skipped_private || skipped_user_excluded)
     {
-        char skip_msg[256];
+        char skip_msg[320];
         snprintf(skip_msg, sizeof(skip_msg),
                  "[xp_sherlock] Skipped %d sim/private/* (engine internals), %d byte/string refs (xplmType_Data), "
-                 "%d unknown-type refs\n",
-                 skipped_private, skipped_data, skipped_unknown);
+                 "%d unknown-type refs, %d user-excluded (snapshot filter)\n",
+                 skipped_private, skipped_data, skipped_unknown, skipped_user_excluded);
         XPLMDebugString(skip_msg);
     }
 
@@ -198,6 +222,13 @@ void rebuild()
 bool is_built() { return s_built; }
 
 const std::vector<LogicalRef> &all() { return s_index; }
+
+void set_user_exclusions(std::vector<std::string> prefixes)
+{
+    s_user_exclusions = std::move(prefixes);
+}
+
+const std::vector<std::string> &user_exclusions() { return s_user_exclusions; }
 
 bool read(const LogicalRef &lr, SampleValue &out)
 {
