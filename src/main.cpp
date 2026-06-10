@@ -2,6 +2,7 @@
 // Mirrors the xp_pilot main.cpp pattern verbatim — only the module wiring is
 // different.
 
+#include "command_recorder.hpp"
 #include "dataref_index.hpp"
 #include "recorder.hpp"
 #include "ui.hpp"
@@ -92,12 +93,24 @@ PLUGIN_API void XPluginStop()
 {
     ui::stop();
     recorder::stop();
+    // command_recorder::disable() is symmetric to enable() in XPluginEnable;
+    // call it here too in case Enable was never reached (unusual but defensive).
+    command_recorder::disable();
     if (s_cmd_toggle)
         XPLMUnregisterCommandHandler(s_cmd_toggle, CmdToggle, 1, nullptr);
     XPLMUnregisterDrawCallback(DrawCallback, xplm_Phase_Window, 1, nullptr);
     XPLMDebugString("[xp_sherlock] Plugin unloaded.\n");
 }
 
-PLUGIN_API int  XPluginEnable() { return 1; }
-PLUGIN_API void XPluginDisable() {}
+PLUGIN_API int XPluginEnable()
+{
+    // command_recorder hooks every command in command_index. The index is
+    // built lazily on the first "Take Snapshot" (same pattern as dataref_index),
+    // so at XPluginEnable time it may still be empty — enable() handles that
+    // case by registering zero handlers; the UI will (re)build and
+    // re-enable() on the first snapshot.
+    command_recorder::enable();
+    return 1;
+}
+PLUGIN_API void XPluginDisable() { command_recorder::disable(); }
 PLUGIN_API void XPluginReceiveMessage(XPLMPluginID, int, void *) {}

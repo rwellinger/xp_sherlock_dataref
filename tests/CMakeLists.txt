@@ -11,6 +11,7 @@ add_executable(xp_sherlock_dataref_tests
     test_smoke.cpp
     test_change_detector.cpp
     test_correlator_ranking.cpp
+    test_command_ranking.cpp
 )
 
 target_include_directories(xp_sherlock_dataref_tests PRIVATE

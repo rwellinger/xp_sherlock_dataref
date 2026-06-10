@@ -314,4 +314,131 @@ std::vector<Candidate> rank(const std::vector<EventStream> &streams, const std::
     return out;
 }
 
+namespace
+{
+
+// Anchor compare for commands: pick the latest anchor <= the fire time.
+// Identical contract to latency_for_event_ms() above but operates on the
+// command timeline (no ChangeEvent wrapper).
+float latency_for_command_ms(float fire_t_sec, const AnchorList &anchors)
+{
+    float best = -1.f;
+    for (float a : anchors)
+    {
+        if (a <= fire_t_sec && a > best)
+            best = a;
+    }
+    if (best < 0.f)
+        return -1.f;
+    return (fire_t_sec - best) * 1000.f;
+}
+
+} // namespace
+
+std::vector<Candidate> rank_commands(const std::vector<CommandEventStream> &streams,
+                                     const std::vector<CommandRefMeta>     &metas,
+                                     const AnchorList                      &anchors,
+                                     const Hints                           &hints)
+{
+    std::vector<Candidate> out;
+    out.reserve(streams.size() / 64); // most commands never fire — start small
+
+    for (std::size_t i = 0; i < streams.size(); ++i)
+    {
+        const CommandEventStream &s = streams[i];
+
+        // Only Begin events count for presence/latency: Begin is the
+        // user-action instant, Continue is "still held" (fires every frame
+        // for held keys), End is the release. Scoring against Continue would
+        // wildly inflate fire counts for any held-down cockpit binding.
+        int   begin_fires = 0;
+        float first_begin = -1.f;
+        std::vector<float> begin_times;
+        begin_times.reserve(s.events.size());
+        for (const auto &e : s.events)
+        {
+            if (e.phase == 0 /*xplm_CommandBegin*/)
+            {
+                ++begin_fires;
+                begin_times.push_back(e.t_sec);
+                if (first_begin < 0.f)
+                    first_begin = e.t_sec;
+            }
+        }
+        if (begin_fires == 0)
+            continue;
+
+        const CommandRefMeta &m = (i < metas.size()) ? metas[i] : CommandRefMeta{};
+
+        Candidate c;
+        c.kind         = Kind::Command;
+        c.command_idx  = static_cast<uint32_t>(i);
+        c.type         = RefType::Int; // unused for commands, default to something printable
+        c.fire_count   = begin_fires;
+        c.last_phase   = s.last_phase;
+        c.total_events = static_cast<int>(s.events.size());
+
+        // Latency to nearest anchor across all Begin fires.
+        float min_lat = -1.f;
+        std::vector<float> lats;
+        lats.reserve(begin_times.size());
+        for (float t : begin_times)
+        {
+            float lat = latency_for_command_ms(t, anchors);
+            if (lat < 0.f)
+                continue;
+            lats.push_back(lat);
+            if (min_lat < 0.f || lat < min_lat)
+                min_lat = lat;
+        }
+        c.has_latency = (min_lat >= 0.f);
+        if (c.has_latency)
+        {
+            c.min_latency_ms = min_lat;
+            std::sort(lats.begin(), lats.end());
+            c.median_latency_ms = lats[lats.size() / 2];
+        }
+
+        // Scoring formula — calibrated to land in roughly the same range as
+        // rank() for DataRefs so the two pipelines interleave sanely in the
+        // shared candidates table.
+        float score = 0.f;
+
+        score += 70.f; // strong presence signal — the command fired at all
+
+        if (c.has_latency)
+        {
+            if (c.min_latency_ms < hints.user_click_window_ms)
+                score += 25.f;
+            if (c.median_latency_ms < 250.f)
+                score += 10.f;
+        }
+
+        if (begin_fires == 1)
+            score += 15.f; // clean one-shot (e.g. battery_1_on)
+
+        if (hints.expected_clicks > 0 && begin_fires == hints.expected_clicks)
+            score += 10.f; // rotary match
+
+        // Chatty penalty — commands that fire far more than the expected cap
+        // are usually held-key bindings or autopilot internal tickers.
+        int expected_cap = (hints.expected_clicks > 0) ? 3 * hints.expected_clicks : 6;
+        int chatty       = begin_fires - expected_cap;
+        if (chatty > 0)
+            score -= 5.f * static_cast<float>(chatty);
+
+        // Tie-breaker: shorter command names win slightly. Prefers top-level
+        // cockpit commands over deep aircraft-specific ones at the margin.
+        if (m.path_length > 0)
+            score -= 0.01f * static_cast<float>(m.path_length);
+
+        c.score = score;
+        if (score > 0.f)
+            out.push_back(c);
+    }
+
+    std::sort(out.begin(), out.end(), [](const Candidate &a, const Candidate &b) { return a.score > b.score; });
+    return out;
+}
+
 } // namespace xp_sherlock

@@ -1,5 +1,7 @@
 #include "recorder.hpp"
 #include "change_detector.hpp"
+#include "command_index.hpp"
+#include "command_recorder.hpp"
 #include "correlator.hpp"
 #include "dataref_index.hpp"
 #include <XPLM/XPLMProcessing.h>
@@ -269,9 +271,29 @@ void finalize_inspect()
     s_hints.user_click_window_ms = 100.f;
     s_candidates                 = rank(s_streams, s_metas, s_anchors, s_hints);
 
-    char banner[200];
-    snprintf(banner, sizeof(banner), "[xp_sherlock] Record stopped: %zu watched, %zu candidates ranked\n",
-             s_watched.size(), s_candidates.size());
+    // Merge in Command candidates. Both lists share the same `score` axis, so a
+    // simple concat + sort produces an interleaved ranking. Commands with no
+    // Begin fires were filtered out inside rank_commands().
+    command_recorder::end_record();
+    const auto &cmd_streams = command_recorder::streams();
+    const auto &cmd_entries = command_index::all();
+    std::vector<CommandRefMeta> cmd_metas(cmd_streams.size());
+    for (std::size_t i = 0; i < cmd_streams.size(); ++i)
+    {
+        if (i < cmd_entries.size())
+            cmd_metas[i].path_length = static_cast<int>(cmd_entries[i].name.size());
+    }
+    auto cmd_candidates = rank_commands(cmd_streams, cmd_metas, s_anchors, s_hints);
+    s_candidates.insert(s_candidates.end(), cmd_candidates.begin(), cmd_candidates.end());
+    std::sort(s_candidates.begin(), s_candidates.end(),
+              [](const Candidate &a, const Candidate &b) { return a.score > b.score; });
+
+    char banner[256];
+    snprintf(banner, sizeof(banner),
+             "[xp_sherlock] Record stopped: %zu watched, %zu DataRef + %zu Command candidates "
+             "(%zu total)\n",
+             s_watched.size(), s_candidates.size() - cmd_candidates.size(),
+             cmd_candidates.size(), s_candidates.size());
     XPLMDebugString(banner);
 }
 
@@ -313,11 +335,13 @@ float baseline_tick(float now)
         s_phase = Phase::Idle; // briefly — start_record will move us forward
         // Log + return; we now wait for the user to click "Record" which calls
         // start_record() and triggers state-allocation + transition to Record.
-        char msg[200];
+        char msg[256];
         snprintf(msg, sizeof(msg),
-                 "[xp_sherlock] Baseline complete: %d of %d refs flagged as ambient noise\n",
-                 ignored, (int)refs.size());
+                 "[xp_sherlock] Baseline complete: %d of %d refs flagged as ambient noise; "
+                 "%d command Begin-fires observed during baseline (expected 0 in a still cockpit)\n",
+                 ignored, (int)refs.size(), command_recorder::baseline_fires_observed());
         XPLMDebugString(msg);
+        command_recorder::set_baseline_phase(false);
         s_phase = Phase::Idle;
         // Set a sentinel so UI knows baseline is finished and Record is allowed.
         // We use the elapsed >= total state as the "baseline done" signal.
@@ -478,6 +502,16 @@ void start_baseline(float baseline_seconds)
 {
     if (!dataref_index::is_built())
         dataref_index::rebuild();
+    // Mirror the dataref lazy-build behaviour for commands. If the command
+    // index hasn't been built yet (e.g. user clicked Take Snapshot before
+    // ever pressing Re-enumerate), build it now and refresh the handler
+    // registrations so command_recorder hooks the newly-found commands.
+    if (!command_index::is_built())
+    {
+        command_recorder::disable();
+        command_index::rebuild();
+        command_recorder::enable();
+    }
 
     s_baseline_total = std::max(0.5f, baseline_seconds);
     s_baseline_start = 0.f;
@@ -485,6 +519,8 @@ void start_baseline(float baseline_seconds)
     s_baseline_changed.clear();
     s_anchors.clear();
     s_candidates.clear();
+    command_recorder::clear_baseline_diagnostics();
+    command_recorder::set_baseline_phase(true);
     s_phase = Phase::Baseline;
     ensure_flight_loop_registered();
     log_msg("[xp_sherlock] Baseline started\n");
@@ -518,6 +554,8 @@ bool start_record(bool expect_bidirectional, int expected_clicks)
     s_frame_counter = 0;
     s_record_start  = now_sec();
     s_anchors.clear();
+    command_recorder::set_baseline_phase(false);
+    command_recorder::begin_record(s_record_start, s_frame_counter);
     s_phase = Phase::Record;
     ensure_flight_loop_registered();
 
@@ -580,6 +618,8 @@ void reset()
     s_array_groups.clear();
     s_anchors.clear();
     s_candidates.clear();
+    command_recorder::set_baseline_phase(false);
+    command_recorder::reset();
     XPLMDebugString("[xp_sherlock] Reset\n");
 }
 

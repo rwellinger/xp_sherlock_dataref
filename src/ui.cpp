@@ -1,5 +1,7 @@
 #include "ui.hpp"
 #include "clipboard.hpp"
+#include "command_index.hpp"
+#include "command_recorder.hpp"
 #include "dataref_index.hpp"
 #include "recorder.hpp"
 #include <XPLM/XPLMDataAccess.h>
@@ -74,6 +76,7 @@ struct ExclusionCategory
 constexpr ExclusionCategory s_exclusion_categories[] = {
     {"Flight model (positions, velocities, forces)", "sim/flightmodel/", "sim/flightmodel2/", true},
     {"Aircraft static config",                       "sim/aircraft/",    "",                  true},
+    {"Airfoil tables (aero coefficients)",           "sim/airfoils/",    "",                  true},
     {"Weather & atmosphere",                         "sim/weather/",     "sim/atmosphere/",   true},
     {"Joystick raw input",                           "sim/joystick/",    "",                  true},
     {"Network / multiplayer",                        "sim/network/",     "sim/multiplayer/",  true},
@@ -92,6 +95,9 @@ bool s_filters_dirty = true; // forces rebuild() before first snapshot, then per
 
 // ── Result filter (live substring filter on candidate table) ─────────────────
 char s_result_filter[128] = "";
+bool s_show_datarefs   = true;
+bool s_show_commands   = true;
+bool s_writable_only   = false;
 
 // ── Capture-window callbacks ─────────────────────────────────────────────────
 //
@@ -334,6 +340,17 @@ std::string value_label(RefType t, SampleValue v)
 
 const char *direction_icon(const Candidate &c)
 {
+    if (c.kind == Kind::Command)
+    {
+        // XPLM phase: Begin=0, Continue=1, End=2.
+        switch (c.last_phase)
+        {
+        case 0: return ">";
+        case 1: return "||";
+        case 2: return "<";
+        default: return "--";
+        }
+    }
     if (c.bidirectional)
         return "<->";
     if (c.monotonic_staircase)
@@ -343,6 +360,23 @@ const char *direction_icon(const Candidate &c)
     if (c.neg_count > 0 && c.pos_count == 0)
         return c.asymmetric_decay ? "v" : "<-";
     return "?";
+}
+
+// Resolve a candidate to its display path. Returns the DataRef display_path
+// for DataRef rows and the command name for Command rows. Returns empty
+// string when the underlying index entry is missing (defensive — should not
+// happen in practice).
+std::string candidate_path(const Candidate &c)
+{
+    if (c.kind == Kind::Command)
+    {
+        const auto &cmds = command_index::all();
+        if (c.command_idx < cmds.size())
+            return cmds[c.command_idx].name;
+        return {};
+    }
+    const LogicalRef *lr = recorder::logical_ref_at(c.logical_ref_idx);
+    return lr ? lr->display_path : std::string{};
 }
 
 // ── Filter helpers ───────────────────────────────────────────────────────────
@@ -470,6 +504,19 @@ void draw_button_row()
     bool can_stop     = (st.phase == Phase::Record);
     bool can_reset    = (st.phase != Phase::Baseline);
 
+    // Rebuild both indexes from the active filter set and refresh command
+    // hooks. Used by both Take Snapshot (when filters dirty) and Re-enumerate.
+    auto rebuild_indexes = [&]() {
+        auto pfx = collect_active_prefixes();
+        dataref_index::set_user_exclusions(pfx);
+        dataref_index::rebuild();
+        command_index::set_user_exclusions(std::move(pfx));
+        // Disable BEFORE rebuild — handler refcons encode old indices.
+        command_recorder::disable();
+        command_index::rebuild();
+        command_recorder::enable();
+    };
+
     ImGui::BeginDisabled(!can_baseline);
     if (ImGui::Button("Take Snapshot"))
     {
@@ -479,8 +526,7 @@ void draw_button_row()
         // it. start_baseline() will pick up the freshly-built index.
         if (s_filters_dirty)
         {
-            dataref_index::set_user_exclusions(collect_active_prefixes());
-            dataref_index::rebuild();
+            rebuild_indexes();
             s_filters_dirty = false;
         }
         s_selected_candidate = -1;
@@ -523,8 +569,7 @@ void draw_button_row()
     if (ImGui::Button("Re-enumerate"))
     {
         s_selected_candidate = -1;
-        dataref_index::set_user_exclusions(collect_active_prefixes());
-        dataref_index::rebuild();
+        rebuild_indexes();
         s_filters_dirty = false;
     }
 
@@ -568,10 +613,10 @@ void draw_candidates_table()
         {
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
-                               "No correlating DataRef found - likely Command-based or internal aircraft logic.");
-            ImGui::TextWrapped("The switch may fire an X-Plane Command without writing a DataRef, or the aircraft's "
-                               "SASL/Lua logic may handle it entirely in-process. Command sniffing is not implemented "
-                               "in v1.");
+                               "No correlating DataRef or Command found.");
+            ImGui::TextWrapped("The switch may be handled entirely inside aircraft Lua/SASL with no observable "
+                               "DataRef or sim/* Command. Try Re-enumerate after the aircraft has fully loaded - "
+                               "plugin commands often register lazily.");
         }
         else
         {
@@ -583,6 +628,24 @@ void draw_candidates_table()
 
     ImGui::Spacing();
     ImGui::Text("Candidates: %zu", cands.size());
+
+    // Kind filter checkboxes — pure client-side row filter. Defaults to both
+    // visible so existing DataRef-only workflows are unaffected.
+    ImGui::SameLine();
+    ImGui::Dummy(ImVec2(16, 0));
+    ImGui::SameLine();
+    ImGui::Checkbox("DataRefs", &s_show_datarefs);
+    ImGui::SameLine();
+    ImGui::Checkbox("Commands", &s_show_commands);
+    ImGui::SameLine();
+    ImGui::Dummy(ImVec2(16, 0));
+    ImGui::SameLine();
+    // Writable-only filter — hides read-only DataRefs so the list narrows to
+    // refs the user can actually drive from outside. Commands are unaffected
+    // (they have no writable concept; fires are always "doable").
+    ImGui::Checkbox("Writable only", &s_writable_only);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Hide read-only DataRefs. Commands are always shown.");
 
     // Live substring filter on the path column. The displayed Rank stays the
     // true index in cands[], so hidden rows never push visible rows into a
@@ -600,33 +663,43 @@ void draw_candidates_table()
             s_result_filter[0] = '\0';
     }
 
+    auto row_visible = [&](const Candidate &c, const std::string &path) -> bool {
+        if (c.kind == Kind::DataRef && !s_show_datarefs)
+            return false;
+        if (c.kind == Kind::Command && !s_show_commands)
+            return false;
+        if (s_writable_only && c.kind == Kind::DataRef && !c.is_writable)
+            return false;
+        if (s_result_filter[0] != '\0' && !path_matches(path, s_result_filter))
+            return false;
+        return true;
+    };
+
     ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                             ImGuiTableFlags_Resizable;
     ImVec2 table_size(0.f, 280.f);
-    if (ImGui::BeginTable("cands", 7, flags, table_size))
+    if (ImGui::BeginTable("cands", 9, flags, table_size))
     {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("Rank", ImGuiTableColumnFlags_WidthFixed, 50.f);
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 70.f);
         ImGui::TableSetupColumn("Score", ImGuiTableColumnFlags_WidthFixed, 60.f);
         ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 56.f);
-        ImGui::TableSetupColumn("Delta", ImGuiTableColumnFlags_WidthFixed, 180.f);
+        ImGui::TableSetupColumn("R/W", ImGuiTableColumnFlags_WidthFixed, 36.f);
+        ImGui::TableSetupColumn("Delta / Fires", ImGuiTableColumnFlags_WidthFixed, 180.f);
         ImGui::TableSetupColumn("Lat (ms)", ImGuiTableColumnFlags_WidthFixed, 80.f);
         ImGui::TableSetupColumn("Dir", ImGuiTableColumnFlags_WidthFixed, 50.f);
         ImGui::TableHeadersRow();
 
         for (int i = 0; i < static_cast<int>(cands.size()); ++i)
         {
-            const Candidate &c   = cands[i];
-            const LogicalRef *lr = recorder::logical_ref_at(c.logical_ref_idx);
-            if (!lr)
+            const Candidate &c    = cands[i];
+            std::string      path = candidate_path(c);
+            if (path.empty())
                 continue;
 
-            // Hide rows that don't match the live filter. `i` is kept as-is —
-            // both the Rank column and s_selected_candidate must reflect the
-            // true position in cands[], otherwise Copy path would lie about
-            // which row was actually selected.
-            if (s_result_filter[0] != '\0' && !path_matches(lr->display_path, s_result_filter))
+            if (!row_visible(c, path))
                 continue;
 
             ImGui::TableNextRow();
@@ -640,32 +713,65 @@ void draw_candidates_table()
                 s_selected_candidate = i;
                 s_last_write_done    = false;
                 // Pre-fill the test value with the current value so a write
-                // is non-destructive unless the user changes it.
+                // is non-destructive unless the user changes it (DataRef rows).
                 s_write_int    = c.current_value.i;
                 s_write_float  = c.current_value.f;
                 s_write_double = c.current_value.d;
             }
 
             ImGui::TableNextColumn();
+            // Tint Command rows so the eye can sweep down the column quickly.
+            if (c.kind == Kind::Command)
+                ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.0f), "Command");
+            else
+                ImGui::TextUnformatted("DataRef");
+
+            ImGui::TableNextColumn();
             ImGui::Text("%.0f", static_cast<double>(c.score));
 
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(lr->display_path.c_str());
+            ImGui::TextUnformatted(path.c_str());
 
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(type_name(c.type));
-
-            ImGui::TableNextColumn();
-            // Show observed range, not baseline→current. Switches that toggle
-            // back to their starting state (e.g. ON-OFF-ON) end with baseline
-            // == current — but the swing in between is the interesting part.
-            std::string mn = value_label(c.type, c.min_seen);
-            std::string mx = value_label(c.type, c.max_seen);
-            std::string nw = value_label(c.type, c.current_value);
-            if (mn == mx)
-                ImGui::Text("= %s", nw.c_str());
+            if (c.kind == Kind::Command)
+                ImGui::TextDisabled("--");
             else
-                ImGui::Text("%s .. %s  (now %s)", mn.c_str(), mx.c_str(), nw.c_str());
+                ImGui::TextUnformatted(type_name(c.type));
+
+            ImGui::TableNextColumn();
+            if (c.kind == Kind::Command)
+            {
+                ImGui::TextDisabled("--");
+            }
+            else if (c.is_writable)
+            {
+                ImGui::TextUnformatted("RW");
+            }
+            else
+            {
+                // Dimmed read-only marker so the eye can spot the write-capable
+                // refs without having to open the test panel for each one.
+                ImGui::TextColored(ImVec4(0.75f, 0.55f, 0.55f, 1.0f), "RO");
+            }
+
+            ImGui::TableNextColumn();
+            if (c.kind == Kind::Command)
+            {
+                ImGui::Text("Fires: %d", c.fire_count);
+            }
+            else
+            {
+                // Show observed range, not baseline→current. Switches that toggle
+                // back to their starting state (e.g. ON-OFF-ON) end with baseline
+                // == current — but the swing in between is the interesting part.
+                std::string mn = value_label(c.type, c.min_seen);
+                std::string mx = value_label(c.type, c.max_seen);
+                std::string nw = value_label(c.type, c.current_value);
+                if (mn == mx)
+                    ImGui::Text("= %s", nw.c_str());
+                else
+                    ImGui::Text("%s .. %s  (now %s)", mn.c_str(), mx.c_str(), nw.c_str());
+            }
 
             ImGui::TableNextColumn();
             if (c.has_latency)
@@ -686,29 +792,70 @@ void draw_candidates_table()
     // the row (and its action buttons) back without losing context.
     if (s_selected_candidate >= 0 && s_selected_candidate < static_cast<int>(cands.size()))
     {
-        const Candidate &c   = cands[s_selected_candidate];
-        const LogicalRef *lr = recorder::logical_ref_at(c.logical_ref_idx);
-        if (lr)
+        const Candidate &c    = cands[s_selected_candidate];
+        std::string      path = candidate_path(c);
+        if (!path.empty())
         {
-            bool selection_visible =
-                (s_result_filter[0] == '\0') || path_matches(lr->display_path, s_result_filter);
+            bool selection_visible = row_visible(c, path);
             if (selection_visible)
             {
                 ImGui::Spacing();
-                ImGui::TextDisabled("Selected: %s", lr->display_path.c_str());
+                ImGui::TextDisabled("Selected: %s", path.c_str());
                 if (ImGui::Button("Copy path"))
-                    clipboard::copy(lr->display_path);
+                    clipboard::copy(path);
                 ImGui::SameLine();
                 if (ImGui::Button("Copy code snippet"))
-                    clipboard::copy(dataref_index::code_snippet(*lr));
+                {
+                    if (c.kind == Kind::Command)
+                    {
+                        const auto &cmds = command_index::all();
+                        if (c.command_idx < cmds.size())
+                            clipboard::copy(command_index::code_snippet(cmds[c.command_idx]));
+                    }
+                    else
+                    {
+                        const LogicalRef *lr = recorder::logical_ref_at(c.logical_ref_idx);
+                        if (lr)
+                            clipboard::copy(dataref_index::code_snippet(*lr));
+                    }
+                }
             }
             else
             {
                 ImGui::Spacing();
-                ImGui::TextDisabled("Selected ref is hidden by the filter - clear the filter to act on it.");
+                ImGui::TextDisabled("Selected entry is hidden by the filter - clear the filter to act on it.");
             }
         }
     }
+}
+
+void draw_test_panel_command(const Candidate &c)
+{
+    const auto &cmds = command_index::all();
+    if (c.command_idx >= cmds.size())
+        return;
+    const CommandEntry &cmd = cmds[c.command_idx];
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Test panel - fire command");
+    ImGui::TextDisabled("%s", cmd.name.c_str());
+    if (!cmd.description.empty())
+        ImGui::TextWrapped("%s", cmd.description.c_str());
+
+    ImGui::Spacing();
+    if (ImGui::Button("Once"))
+        command_recorder::test_fire(c.command_idx, /*mode=*/0);
+    ImGui::SameLine();
+    if (ImGui::Button("Begin"))
+        command_recorder::test_fire(c.command_idx, /*mode=*/1);
+    ImGui::SameLine();
+    if (ImGui::Button("End"))
+        command_recorder::test_fire(c.command_idx, /*mode=*/2);
+
+    ImGui::TextWrapped("Once is the safe default (Begin+End in one call). Begin/End are paired - use only when "
+                       "the command is meant to be held (e.g. starter motor). Mismatched Begin/End can leave the "
+                       "command stuck.");
 }
 
 void draw_test_panel()
@@ -717,13 +864,31 @@ void draw_test_panel()
     if (s_selected_candidate < 0 || s_selected_candidate >= static_cast<int>(cands.size()))
         return;
 
-    const Candidate &c   = cands[s_selected_candidate];
+    const Candidate &c = cands[s_selected_candidate];
+
+    if (c.kind == Kind::Command)
+    {
+        // Skip rendering when the row is currently filtered out (same guard
+        // logic as the DataRef branch below).
+        const auto &cmds = command_index::all();
+        if (c.command_idx >= cmds.size())
+            return;
+        if (!s_show_commands)
+            return;
+        if (s_result_filter[0] != '\0' && !path_matches(cmds[c.command_idx].name, s_result_filter))
+            return;
+        draw_test_panel_command(c);
+        return;
+    }
+
     const LogicalRef *lr = recorder::logical_ref_at(c.logical_ref_idx);
     if (!lr)
         return;
 
     // Don't render the test panel while the selected ref is hidden by the
     // active result filter — same rationale as the Copy-button guard above.
+    if (!s_show_datarefs)
+        return;
     if (s_result_filter[0] != '\0' && !path_matches(lr->display_path, s_result_filter))
         return;
 

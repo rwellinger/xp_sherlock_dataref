@@ -64,9 +64,49 @@ struct EventStream
     SampleValue              current_value{};
 };
 
+// Kind discriminates DataRef candidates from Command candidates inside the
+// shared `Candidate` vector. Both kinds rank against the same score axis so
+// they interleave naturally in the UI table.
+enum class Kind : uint8_t
+{
+    DataRef,
+    Command,
+};
+
+inline const char *kind_name(Kind k)
+{
+    return (k == Kind::Command) ? "Command" : "DataRef";
+}
+
+// A single command fire observed during the Record window. Phase encodes the
+// XPLM command lifecycle (Begin=0, Continue=1, End=2) — we keep all three so
+// the UI can show users the dominant phase.
+struct CommandFireEvent
+{
+    uint32_t frame    = 0;
+    float    t_sec    = 0.f;
+    uint8_t  phase    = 0;
+};
+
+struct CommandEventStream
+{
+    uint32_t                      command_idx = 0;
+    std::vector<CommandFireEvent> events;
+    uint8_t                       last_phase  = 0xFF;
+};
+
+// Parallel-array companion to CommandEventStream, mirroring how RefMeta
+// accompanies EventStream for DataRefs.
+struct CommandRefMeta
+{
+    int path_length = 0; // for tie-breaking (shorter wins slightly)
+};
+
 struct Candidate
 {
+    Kind     kind                = Kind::DataRef;
     uint32_t logical_ref_idx     = 0;
+    uint32_t command_idx         = 0; // valid iff kind == Command
     int      pos_count           = 0;
     int      neg_count           = 0;
     bool     bidirectional       = false;
@@ -89,6 +129,9 @@ struct Candidate
     // even though the ref clearly moved).
     SampleValue min_seen{};
     SampleValue max_seen{};
+    // Command-only fields. Populated by rank_commands() for kind==Command rows.
+    int     fire_count = 0;
+    uint8_t last_phase = 0;
 };
 
 } // namespace xp_sherlock

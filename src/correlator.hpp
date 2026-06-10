@@ -42,4 +42,13 @@ float median_latency_ms(const EventStream &s, const AnchorList &anchors);
 std::vector<Candidate> rank(const std::vector<EventStream> &streams, const std::vector<RefMeta> &metas,
                             const AnchorList &anchors, const Hints &hints);
 
+// Score Command-fire streams against the recording window. Commands have no
+// value/delta — scoring is presence + anchor latency + fire-count fit.
+// `metas` MUST be parallel to `streams`. Returns candidates with score > 0,
+// sorted descending by score. The returned Candidates have kind=Command.
+std::vector<Candidate> rank_commands(const std::vector<CommandEventStream> &streams,
+                                     const std::vector<CommandRefMeta>     &metas,
+                                     const AnchorList                      &anchors,
+                                     const Hints                           &hints);
+
 } // namespace xp_sherlock

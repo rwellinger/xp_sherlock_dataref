@@ -47,6 +47,8 @@ set(IMGUI_SOURCES
 add_library(xp_sherlock_dataref MODULE
     src/main.cpp
     src/dataref_index.cpp
+    src/command_index.cpp
+    src/command_recorder.cpp
     src/recorder.cpp
     src/correlator.cpp
     src/ui.cpp
