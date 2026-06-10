@@ -7,8 +7,7 @@ An X-Plane 12 plugin that finds the `sim/...` DataRef driving a cockpit switch
 
 ## Why
 
-Some payware aircraft (e.g. **AOA Simulations T-6A Texan II**) do not register
-their own branded DataRefs. Instead they repurpose unused default `sim/...`
+Some aircraft do not register their own branded DataRefs. Instead they repurpose unused default `sim/...`
 DataRefs as storage cells for custom switches. Observed real examples:
 
 | Cockpit function | Repurposed DataRef                                            |
