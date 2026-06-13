@@ -18,11 +18,14 @@
  */
 
 #include "command_index.hpp"
+#include <XPLM/XPLMPlanes.h>
 #include <XPLM/XPLMUtilities.h>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <set>
 #include <string>
 
 namespace xp_sherlock
@@ -34,6 +37,11 @@ namespace
 std::vector<CommandEntry> s_index;
 bool                      s_built = false;
 std::vector<std::string>  s_user_exclusions;
+
+// Names already placed in s_index this rebuild. Used to dedup across the global
+// Commands.txt and the aircraft-local *_Commands.txt (a command must be hooked
+// exactly once — command_recorder registers one handler per index entry).
+std::set<std::string> s_indexed_names;
 
 // Engine-internal commands that never correspond to cockpit controls. Same
 // rationale as `sim/private/` for DataRefs: filtering at enum time keeps the
@@ -81,6 +89,12 @@ bool parse_line(const std::string &line, std::string &name, std::string &desc)
     std::string s = line;
     trim(s);
     if (s.empty() || s[0] == '#')
+        return false;
+    // Aircraft-local *_Commands.txt (e.g. the Zibo 737's B738_Commands.txt) use
+    // '--' for comments and '----' rule lines between sections; the stock
+    // Commands.txt never starts a command name with '--', so skipping these is
+    // safe and keeps the unresolved counter honest.
+    if (s.size() >= 2 && s[0] == '-' && s[1] == '-')
         return false;
     std::size_t i = 0;
     while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])))
@@ -147,6 +161,10 @@ bool try_register(const std::string &name, const std::string &desc)
             return false;
     }
 
+    // Dedup across command sources (global + aircraft-local files).
+    if (s_indexed_names.count(name))
+        return false;
+
     XPLMCommandRef h = XPLMFindCommand(name.c_str());
     if (!h)
         return false;
@@ -156,7 +174,98 @@ bool try_register(const std::string &name, const std::string &desc)
     e.name        = name;
     e.description = desc;
     s_index.push_back(std::move(e));
+    s_indexed_names.insert(name);
     return true;
+}
+
+// Per-file parse/resolve tally, accumulated across all command sources.
+struct FileStats
+{
+    int total_lines    = 0;
+    int parsed         = 0;
+    int resolved       = 0;
+    int unresolved     = 0;
+    int skipped_filter = 0;
+};
+
+// Read one Commands.txt-format file and register every resolvable command.
+// Shared by the global Resources/plugins/Commands.txt and the aircraft-local
+// *_Commands.txt files — both use the same whitespace-separated format. Returns
+// false if the file could not be opened.
+bool process_command_file(const std::string &path, FileStats &st)
+{
+    std::ifstream in(path);
+    if (!in.is_open())
+        return false;
+
+    std::string line;
+    while (std::getline(in, line))
+    {
+        ++st.total_lines;
+        std::string name, desc;
+        if (!parse_line(line, name, desc))
+            continue;
+        ++st.parsed;
+
+        // Pre-filter so we don't burn an XPLMFindCommand on excluded names —
+        // keeps the rebuild fast on payware installs with large command files.
+        if (starts_with(name, PRIVATE_PREFIX, PRIVATE_PREFIX_LEN))
+        {
+            ++st.skipped_filter;
+            continue;
+        }
+        bool excluded = false;
+        for (const auto &px : s_user_exclusions)
+        {
+            if (!px.empty() && starts_with(name, px.c_str(), px.size()))
+            {
+                excluded = true;
+                break;
+            }
+        }
+        if (excluded)
+        {
+            ++st.skipped_filter;
+            continue;
+        }
+
+        if (try_register(name, desc))
+            ++st.resolved;
+        else
+            ++st.unresolved;
+    }
+    return true;
+}
+
+// Case-insensitive suffix match (filenames are case-insensitive on macOS/Win).
+bool ends_with_ci(const std::string &s, const char *suffix)
+{
+    const std::size_t n = std::strlen(suffix);
+    if (s.size() < n)
+        return false;
+    const std::size_t off = s.size() - n;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        if (std::tolower(static_cast<unsigned char>(s[off + i])) !=
+            std::tolower(static_cast<unsigned char>(suffix[i])))
+            return false;
+    }
+    return true;
+}
+
+// Directory containing the user aircraft's .acf (trailing separator included),
+// or empty if it cannot be determined. Relies on XPLM_USE_NATIVE_PATHS (enabled
+// in XPluginStart) so the path is a real POSIX/Windows path.
+std::string user_aircraft_dir()
+{
+    char file_name[256]  = {0};
+    char acf_path[1024]  = {0};
+    XPLMGetNthAircraftModel(XPLM_USER_AIRCRAFT, file_name, acf_path);
+    std::string p = acf_path;
+    if (p.empty())
+        return {};
+    const std::size_t slash = p.find_last_of("/\\");
+    return (slash == std::string::npos) ? std::string{} : p.substr(0, slash + 1);
 }
 
 } // namespace
@@ -167,59 +276,15 @@ namespace command_index
 void rebuild()
 {
     s_index.clear();
+    s_indexed_names.clear();
     s_built = false;
 
+    // ── Source 1: stock X-Plane commands (Resources/plugins/Commands.txt) ──
     const std::string path = find_commands_txt_path();
-    std::ifstream     in(path);
+    FileStats         global{};
+    bool              used_fallback = false;
 
-    int  total_lines    = 0;
-    int  parsed         = 0;
-    int  resolved       = 0;
-    int  unresolved     = 0;
-    int  skipped_filter = 0;
-    bool used_fallback  = false;
-
-    if (in.is_open())
-    {
-        std::string line;
-        while (std::getline(in, line))
-        {
-            ++total_lines;
-            std::string name, desc;
-            if (!parse_line(line, name, desc))
-                continue;
-            ++parsed;
-
-            // Pre-filter check so we don't burn an XPLMFindCommand on
-            // explicitly excluded names — keeps the rebuild fast on payware
-            // installs with very large Commands.txt files.
-            if (starts_with(name, PRIVATE_PREFIX, PRIVATE_PREFIX_LEN))
-            {
-                ++skipped_filter;
-                continue;
-            }
-            bool excluded = false;
-            for (const auto &px : s_user_exclusions)
-            {
-                if (!px.empty() && starts_with(name, px.c_str(), px.size()))
-                {
-                    excluded = true;
-                    break;
-                }
-            }
-            if (excluded)
-            {
-                ++skipped_filter;
-                continue;
-            }
-
-            if (try_register(name, desc))
-                ++resolved;
-            else
-                ++unresolved;
-        }
-    }
-    else
+    if (!process_command_file(path, global))
     {
         used_fallback = true;
         XPLMDebugString(
@@ -227,29 +292,59 @@ void rebuild()
             "Command detection coverage will be limited.\n");
         for (std::size_t i = 0; i < FALLBACK_COMMAND_COUNT; ++i)
         {
-            ++parsed;
-            std::string name = FALLBACK_COMMANDS[i];
-            std::string desc;
-            if (try_register(name, desc))
-                ++resolved;
+            ++global.parsed;
+            if (try_register(FALLBACK_COMMANDS[i], std::string{}))
+                ++global.resolved;
             else
-                ++unresolved;
+                ++global.unresolved;
         }
     }
 
-    char banner[320];
+    // ── Source 2: aircraft-local *_Commands.txt ──
+    // The SDK cannot enumerate runtime-registered commands, so custom aircraft
+    // (e.g. the Zibo 737) ship their command names in <aircraft>/*_Commands.txt.
+    // This is the same source DataRefTool reads — no network/REST API involved.
+    int               aircraft_files    = 0;
+    int               aircraft_resolved = 0;
+    const std::string ac_dir            = user_aircraft_dir();
+    if (!ac_dir.empty())
+    {
+        std::error_code              ec;
+        std::filesystem::directory_iterator it(ac_dir, ec);
+        const std::filesystem::directory_iterator end;
+        for (; !ec && it != end; it.increment(ec))
+        {
+            std::error_code fec;
+            if (!it->is_regular_file(fec) || fec)
+                continue;
+            const std::string fname = it->path().filename().string();
+            if (!ends_with_ci(fname, "Commands.txt"))
+                continue;
+
+            FileStats st{};
+            if (process_command_file(it->path().string(), st))
+            {
+                ++aircraft_files;
+                aircraft_resolved += st.resolved;
+            }
+        }
+    }
+
+    char banner[480];
     if (used_fallback)
     {
         snprintf(banner, sizeof(banner),
-                 "[xp_sherlock] Command index built from FALLBACK list: %d resolved, %d unresolved.\n",
-                 resolved, unresolved);
+                 "[xp_sherlock] Command index built from FALLBACK list: %d resolved, %d unresolved; "
+                 "aircraft files: %d (%d resolved). Total indexed: %zu.\n",
+                 global.resolved, global.unresolved, aircraft_files, aircraft_resolved, s_index.size());
     }
     else
     {
         snprintf(banner, sizeof(banner),
-                 "[xp_sherlock] Command index built from %s: %d lines, %d parsed, "
-                 "%d resolved, %d unresolved, %d filtered.\n",
-                 path.c_str(), total_lines, parsed, resolved, unresolved, skipped_filter);
+                 "[xp_sherlock] Command index: global %s (%d parsed, %d resolved, %d filtered); "
+                 "aircraft files: %d (%d resolved). Total indexed: %zu.\n",
+                 path.c_str(), global.parsed, global.resolved, global.skipped_filter,
+                 aircraft_files, aircraft_resolved, s_index.size());
     }
     XPLMDebugString(banner);
     XPLMDebugString("[xp_sherlock] Note: late-binding aircraft/plugin commands may not be present yet. "

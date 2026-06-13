@@ -47,6 +47,12 @@ enum class Phase : std::uint8_t
     Baseline,
     Record,
     Inspect,
+    // Additive noise capture: like Baseline, but instead of resetting the
+    // ignore-set it GROWS it. The user performs actions they want excluded
+    // (e.g. powering a bus that cascades into many refs) and every ref that
+    // moves is added to the ignore-set, so the subsequent Record subtracts
+    // that whole cascade. Target-blind: it only needs you to drive the noise.
+    NoiseCapture,
 };
 
 namespace recorder
@@ -59,6 +65,14 @@ Phase phase();
 
 // Start Phase 1. Asks dataref_index to (re)build if needed, resets ignore_set.
 void start_baseline(float baseline_seconds = 2.5f);
+
+// Begin/end additive noise capture (the "Mark as noise" subtract step). While
+// active, any ref that moves relative to the baseline is added to the
+// ignore-set; it does NOT reset the existing ignore-set, so multiple captures
+// accumulate. Open-ended: runs until stop_noise_capture(). No-op if called from
+// Baseline/Record. Seeds the baseline arrays if no snapshot was taken yet.
+void start_noise_capture();
+void stop_noise_capture();
 
 // Begin Phase 2. Allocates ring buffers + EventStreams sized to
 // `watched_refs = all - ignore_set`. Returns false (and stays in Idle) if

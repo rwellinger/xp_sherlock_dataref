@@ -308,10 +308,11 @@ const char *phase_label(Phase p)
 {
     switch (p)
     {
-    case Phase::Idle:     return "Idle";
-    case Phase::Baseline: return "Baseline";
-    case Phase::Record:   return "Record";
-    case Phase::Inspect:  return "Inspect";
+    case Phase::Idle:         return "Idle";
+    case Phase::Baseline:     return "Baseline";
+    case Phase::Record:       return "Record";
+    case Phase::Inspect:      return "Inspect";
+    case Phase::NoiseCapture: return "Mark Noise";
     }
     return "?";
 }
@@ -333,6 +334,9 @@ std::string hint_text(Phase p)
                    "Click 'Stop' when done (auto-stop is disabled).";
     case Phase::Inspect:
         return "Top-ranked DataRef is most likely the cause. Lower ranks may be downstream effects.";
+    case Phase::NoiseCapture:
+        return "Capturing noise: drive everything you want EXCLUDED (e.g. power the bus). "
+               "Every ref that moves is added to the ignore-set. Click 'Stop Noise' when done, then Record your target.";
     }
     return "";
 }
@@ -414,6 +418,22 @@ std::vector<std::string> collect_active_prefixes()
             out.emplace_back(cat.prefix_b);
     }
     return out;
+}
+
+// Rebuild both indexes from the active snapshot-filter set and refresh the
+// command hooks. Shared by the "Take Snapshot" / "Re-enumerate" buttons and by
+// the automatic re-enumeration on aircraft load (ui::reenumerate). Must run on
+// the main thread — it issues XPLM enumeration + command-handler calls.
+void do_reenumerate()
+{
+    auto pfx = collect_active_prefixes();
+    dataref_index::set_user_exclusions(pfx);
+    dataref_index::rebuild();
+    command_index::set_user_exclusions(std::move(pfx));
+    // Disable BEFORE rebuild — handler refcons encode old indices.
+    command_recorder::disable();
+    command_index::rebuild();
+    command_recorder::enable();
 }
 
 // Case-insensitive substring search. Used for the live result-filter — keeps
@@ -502,6 +522,11 @@ void draw_status_bar()
     {
         ImGui::Text("   %d candidates", st.candidate_count);
     }
+    else if (st.phase == Phase::NoiseCapture)
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "   capturing... %d refs excluded as noise",
+                           st.ignored_count);
+    }
 
     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Hint: %s", hint_text(st.phase).c_str());
     if (st.total_logical > 0)
@@ -516,25 +541,23 @@ void draw_button_row()
 {
     auto st = recorder::status();
 
-    bool can_baseline = (st.phase == Phase::Idle || st.phase == Phase::Inspect);
+    bool is_noise      = (st.phase == Phase::NoiseCapture);
+    bool can_baseline  = (st.phase == Phase::Idle || st.phase == Phase::Inspect);
     bool baseline_done = !st.baseline_in_progress && st.ignored_count > 0;
-    bool can_record   = baseline_done && st.phase != Phase::Record && st.phase != Phase::Baseline;
-    bool can_act      = (st.phase == Phase::Record);
-    bool can_stop     = (st.phase == Phase::Record);
-    bool can_reset    = (st.phase != Phase::Baseline);
+    bool can_record    = baseline_done && st.phase != Phase::Record && st.phase != Phase::Baseline && !is_noise;
+    bool can_act       = (st.phase == Phase::Record);
+    bool can_stop      = (st.phase == Phase::Record);
+    bool can_reset     = (st.phase != Phase::Baseline && !is_noise);
+    // "Mark Noise" can start from Idle or Inspect (a baseline is recommended but
+    // not required — start_noise_capture seeds its own reference if needed).
+    bool can_noise     = can_baseline;
 
-    // Rebuild both indexes from the active filter set and refresh command
-    // hooks. Used by both Take Snapshot (when filters dirty) and Re-enumerate.
-    auto rebuild_indexes = [&]() {
-        auto pfx = collect_active_prefixes();
-        dataref_index::set_user_exclusions(pfx);
-        dataref_index::rebuild();
-        command_index::set_user_exclusions(std::move(pfx));
-        // Disable BEFORE rebuild — handler refcons encode old indices.
-        command_recorder::disable();
-        command_index::rebuild();
-        command_recorder::enable();
-    };
+    // Left-aligned group labels so the two action rows read as a clear sequence.
+    constexpr float kLabelCol = 90.f;
+
+    // ── Workflow: the primary three-step sequence ──
+    ImGui::TextDisabled("Workflow");
+    ImGui::SameLine(kLabelCol);
 
     ImGui::BeginDisabled(!can_baseline);
     if (ImGui::Button("Take Snapshot"))
@@ -545,7 +568,7 @@ void draw_button_row()
         // it. start_baseline() will pick up the freshly-built index.
         if (s_filters_dirty)
         {
-            rebuild_indexes();
+            do_reenumerate();
             s_filters_dirty = false;
         }
         s_selected_candidate = -1;
@@ -563,63 +586,102 @@ void draw_button_row()
     ImGui::EndDisabled();
     ImGui::SameLine();
 
-    ImGui::BeginDisabled(!can_act);
-    if (ImGui::Button("I Acted Now"))
-        recorder::mark_user_action();
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-
     ImGui::BeginDisabled(!can_stop);
     if (ImGui::Button("Stop"))
         recorder::stop_record();
     ImGui::EndDisabled();
+
+    // ── Refine: optional helpers used mid-flow ──
+    ImGui::TextDisabled("Refine");
+    ImGui::SameLine(kLabelCol);
+
+    // Mark Noise (subtract): grow the ignore-set with whatever you drive while
+    // it's active. While capturing, the button flips to "Stop Noise" and stays
+    // enabled so the user can always end the capture.
+    if (is_noise)
+    {
+        if (ImGui::Button("Stop Noise"))
+            recorder::stop_noise_capture();
+    }
+    else
+    {
+        ImGui::BeginDisabled(!can_noise);
+        if (ImGui::Button("Mark Noise"))
+        {
+            s_selected_candidate = -1;
+            recorder::start_noise_capture();
+        }
+        ImGui::EndDisabled();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Subtract a cascade: start, drive everything you want IGNORED (e.g. power the bus),\n"
+                          "then Stop. Those refs are excluded from the next Record so only your target stands out.");
     ImGui::SameLine();
 
-    ImGui::BeginDisabled(!can_reset);
-    if (ImGui::Button("Reset"))
-    {
-        s_selected_candidate = -1;
-        s_last_write_done    = false;
-        recorder::reset();
-    }
+    ImGui::BeginDisabled(!can_act);
+    if (ImGui::Button("I Acted Now"))
+        recorder::mark_user_action();
     ImGui::EndDisabled();
-    ImGui::SameLine();
 
-    if (ImGui::Button("Re-enumerate"))
+    // ── Advanced: mode, auto-stop, reset, re-enumerate, snapshot filters ──
+    // Collapsed by default so first-time users only see the Workflow/Refine
+    // rows. Everything power-users need stays one click away.
+    if (ImGui::CollapsingHeader("Advanced"))
     {
-        s_selected_candidate = -1;
-        rebuild_indexes();
-        s_filters_dirty = false;
-    }
+        ImGui::Indent();
 
-    // Mode row
-    ImGui::Spacing();
-    ImGui::RadioButton("Bool ON-OFF-ON", &s_expected_clicks, 3);
-    ImGui::SameLine();
-    int rotary_now = (s_expected_clicks == 3) ? 4 : s_expected_clicks;
-    if (ImGui::RadioButton("Rotary clicks:", s_expected_clicks != 3))
-        s_expected_clicks = rotary_now;
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(80.f);
-    int clicks_edit = (s_expected_clicks == 3) ? 4 : s_expected_clicks;
-    if (ImGui::InputInt("##clicks", &clicks_edit, 1, 1))
-    {
-        if (clicks_edit < 2) clicks_edit = 2;
-        if (clicks_edit > 16) clicks_edit = 16;
-        if (s_expected_clicks != 3)
-            s_expected_clicks = clicks_edit;
-    }
-    s_expect_bidirectional = (s_expected_clicks == 3);
+        // Record mode: bool toggle vs. rotary with an explicit click count.
+        ImGui::RadioButton("Bool ON-OFF-ON", &s_expected_clicks, 3);
+        ImGui::SameLine();
+        int rotary_now = (s_expected_clicks == 3) ? 4 : s_expected_clicks;
+        if (ImGui::RadioButton("Rotary clicks:", s_expected_clicks != 3))
+            s_expected_clicks = rotary_now;
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(80.f);
+        int clicks_edit = (s_expected_clicks == 3) ? 4 : s_expected_clicks;
+        if (ImGui::InputInt("##clicks", &clicks_edit, 1, 1))
+        {
+            if (clicks_edit < 2) clicks_edit = 2;
+            if (clicks_edit > 16) clicks_edit = 16;
+            if (s_expected_clicks != 3)
+                s_expected_clicks = clicks_edit;
+        }
+        s_expect_bidirectional = (s_expected_clicks == 3);
 
-    // Auto-stop toggle. On large displays the mouse travel between cockpit
-    // switch and the "I Acted Now" button can take seconds — auto-stop
-    // (default 5 s + 3 events) may fire before you've finished the sequence.
-    // Turning it off makes Record run until you click Stop.
-    bool as = recorder::auto_stop_enabled();
-    if (ImGui::Checkbox("Auto-stop when pattern detected", &as))
-        recorder::set_auto_stop_enabled(as);
-    ImGui::SameLine();
-    ImGui::TextDisabled("(off = always stop manually)");
+        // Auto-stop toggle. On large displays the mouse travel between cockpit
+        // switch and the "I Acted Now" button can take seconds — auto-stop
+        // (default 5 s + 3 events) may fire before you've finished the sequence.
+        // Turning it off makes Record run until you click Stop.
+        bool as = recorder::auto_stop_enabled();
+        if (ImGui::Checkbox("Auto-stop when pattern detected", &as))
+            recorder::set_auto_stop_enabled(as);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(off = always stop manually)");
+
+        ImGui::Spacing();
+        ImGui::BeginDisabled(!can_reset);
+        if (ImGui::Button("Reset"))
+        {
+            s_selected_candidate = -1;
+            s_last_write_done    = false;
+            recorder::reset();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Re-enumerate"))
+        {
+            s_selected_candidate = -1;
+            do_reenumerate();
+            s_filters_dirty = false;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(rebuild ref/command index after an aircraft swap)");
+
+        ImGui::Spacing();
+        draw_snapshot_filters();
+
+        ImGui::Unindent();
+    }
 }
 
 void draw_candidates_table()
@@ -682,6 +744,11 @@ void draw_candidates_table()
             s_result_filter[0] = '\0';
     }
 
+    // The "now" value in the Delta column is read live every frame. After Record
+    // stops you can re-flip the switch and watch which candidate still reacts
+    // (its value moves and turns yellow) — a quick way to break ties.
+    ImGui::TextDisabled("Tip: \"now\" values are live - re-flip the switch to see which candidate still reacts.");
+
     auto row_visible = [&](const Candidate &c, const std::string &path) -> bool {
         if (c.kind == Kind::DataRef && !s_show_datarefs)
             return false;
@@ -692,6 +759,19 @@ void draw_candidates_table()
         if (s_result_filter[0] != '\0' && !path_matches(path, s_result_filter))
             return false;
         return true;
+    };
+
+    // Reads a DataRef candidate's current value straight from its cached handle.
+    // The draw callback runs every frame regardless of recorder phase, so this
+    // keeps the table live after Record stops (Inspect): re-flip the switch and
+    // the reacting ref's value visibly moves while the others stay put — the
+    // quickest way to confirm which candidate is really the one. Cheap: one SDK
+    // read per visible DataRef row, handle already resolved at enumeration time.
+    auto live_value = [](const Candidate &c, SampleValue &out) -> bool {
+        if (c.kind != Kind::DataRef)
+            return false;
+        const LogicalRef *lr = recorder::logical_ref_at(c.logical_ref_idx);
+        return lr && dataref_index::read(*lr, out);
     };
 
     ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
@@ -783,13 +863,28 @@ void draw_candidates_table()
                 // Show observed range, not baseline→current. Switches that toggle
                 // back to their starting state (e.g. ON-OFF-ON) end with baseline
                 // == current — but the swing in between is the interesting part.
+                // The "now" value is read live every frame (see live_value), so
+                // re-toggling the switch in Inspect updates it in place.
+                SampleValue       live{};
+                const bool        have_live = live_value(c, live);
+                const std::string nw        = value_label(c.type, have_live ? live : c.current_value);
+                const bool        moved_now = have_live && nw != value_label(c.type, c.current_value);
+
                 std::string mn = value_label(c.type, c.min_seen);
                 std::string mx = value_label(c.type, c.max_seen);
-                std::string nw = value_label(c.type, c.current_value);
+
+                char cell[112];
                 if (mn == mx)
-                    ImGui::Text("= %s", nw.c_str());
+                    snprintf(cell, sizeof(cell), "= %s", nw.c_str());
                 else
-                    ImGui::Text("%s .. %s  (now %s)", mn.c_str(), mx.c_str(), nw.c_str());
+                    snprintf(cell, sizeof(cell), "%s .. %s  (now %s)", mn.c_str(), mx.c_str(), nw.c_str());
+
+                // Highlight when the live value currently differs from where
+                // Record left it — i.e. the ref is reacting right now.
+                if (moved_now)
+                    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "%s", cell);
+                else
+                    ImGui::TextUnformatted(cell);
             }
 
             ImGui::TableNextColumn();
@@ -969,6 +1064,11 @@ void draw_test_panel()
 
 } // namespace
 
+// Public entry point for an out-of-band re-enumeration (e.g. the plugin's
+// aircraft-load handler). Same effect as the "Re-enumerate" button, honouring
+// the currently active snapshot filters. Main thread only.
+void reenumerate() { do_reenumerate(); }
+
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 void init()
 {
@@ -1087,7 +1187,6 @@ void draw()
         {
             draw_status_bar();
             ImGui::Separator();
-            draw_snapshot_filters();
             draw_button_row();
             ImGui::Separator();
             draw_candidates_table();

@@ -22,11 +22,15 @@
 // XPLM command API.
 //
 // IMPORTANT XPLM limitation: there is no XPLMCountCommands / xx_GetByIndex —
-// commands cannot be enumerated by the SDK. We therefore read X-Plane's
-// installed `Resources/plugins/Commands.txt` at runtime (via XPLMGetSystemPath)
-// and call XPLMFindCommand for every entry. If Commands.txt is missing or
-// unreadable we fall back to a small embedded list of well-known sim/* commands
-// so the feature isn't silently dead.
+// commands cannot be enumerated by the SDK. We therefore read command *names*
+// from text files at runtime and call XPLMFindCommand for every entry:
+//   1. X-Plane's installed `Resources/plugins/Commands.txt` (stock commands).
+//   2. The user aircraft's `<aircraft>/*_Commands.txt` (custom commands, e.g.
+//      the Zibo 737's B738_Commands.txt) — runtime-registered commands that are
+//      otherwise invisible to the SDK. Same source DataRefTool reads.
+// If the stock Commands.txt is missing we fall back to a small embedded list of
+// well-known sim/* commands so the feature isn't silently dead. Names are
+// deduplicated across both sources.
 
 #pragma once
 

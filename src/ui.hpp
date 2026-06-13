@@ -38,5 +38,11 @@ void draw();
 void toggle();
 bool is_open();
 
+// Force a fresh enumeration of datarefs + commands (same as the "Re-enumerate"
+// button), honouring the active snapshot filters. Called on aircraft load so a
+// newly swapped plane's lazily-registered refs/commands become visible without
+// the user clicking anything. Main thread only.
+void reenumerate();
+
 } // namespace ui
 } // namespace xp_sherlock

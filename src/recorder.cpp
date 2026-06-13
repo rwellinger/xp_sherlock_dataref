@@ -316,33 +316,55 @@ void finalize_inspect()
     XPLMDebugString(banner);
 }
 
+// Seed the baseline reference arrays from current ref values, unless already
+// sized to the live index. Returns true iff it seeded on this call (so the
+// caller can skip the mover-flagging pass for the very first tick). Shared by
+// Baseline (Phase 1) and additive Noise-capture.
+bool ensure_baseline_arrays_seeded()
+{
+    const auto &refs = dataref_index::all();
+    if (s_baseline_value.size() == refs.size())
+        return false;
+    s_baseline_value.assign(refs.size(), SampleValue{});
+    s_baseline_changed.assign(refs.size(), false);
+    for (std::size_t i = 0; i < refs.size(); ++i)
+        dataref_index::read(refs[i], s_baseline_value[i]);
+    return true;
+}
+
+// Flag every ref whose current value deviates from its baseline value, adding
+// it to the ignore-set. Idempotent per ref (already-flagged refs are skipped).
+// Shared by the Baseline tick and the Noise-capture tick — the only difference
+// between the two phases is that Baseline resets the set first and Noise-capture
+// does not.
+void flag_movers_against_baseline()
+{
+    const auto &refs = dataref_index::all();
+    // Guard against a mid-capture re-enumeration that resized the index out from
+    // under our parallel arrays — skip this pass rather than index out of bounds.
+    if (s_baseline_changed.size() != refs.size() || s_baseline_value.size() != refs.size())
+        return;
+    for (std::size_t i = 0; i < refs.size(); ++i)
+    {
+        if (s_baseline_changed[i])
+            continue;
+        SampleValue cur;
+        if (!dataref_index::read(refs[i], cur))
+            continue;
+        if (exceeds_epsilon(refs[i].type, s_baseline_value[i], cur))
+            s_baseline_changed[i] = true;
+    }
+}
+
 float baseline_tick(float now)
 {
     if (s_baseline_start == 0.f)
         s_baseline_start = now;
 
     const auto &refs = dataref_index::all();
-    if (s_baseline_value.size() != refs.size())
-    {
-        s_baseline_value.assign(refs.size(), SampleValue{});
-        s_baseline_changed.assign(refs.size(), false);
-        // initial read
-        for (std::size_t i = 0; i < refs.size(); ++i)
-            dataref_index::read(refs[i], s_baseline_value[i]);
-    }
-    else
-    {
-        for (std::size_t i = 0; i < refs.size(); ++i)
-        {
-            if (s_baseline_changed[i])
-                continue;
-            SampleValue cur;
-            if (!dataref_index::read(refs[i], cur))
-                continue;
-            if (exceeds_epsilon(refs[i].type, s_baseline_value[i], cur))
-                s_baseline_changed[i] = true;
-        }
-    }
+    // First tick seeds the reference values; subsequent ticks flag movers.
+    if (!ensure_baseline_arrays_seeded())
+        flag_movers_against_baseline();
 
     float elapsed = now - s_baseline_start;
     if (elapsed >= s_baseline_total)
@@ -473,6 +495,11 @@ float flight_loop_cb(float, float, int, void *)
     }
     case Phase::Record:
         return record_tick(now);
+    case Phase::NoiseCapture:
+        // Open-ended: keep flagging movers every frame until the user stops.
+        // Arrays are guaranteed seeded by start_noise_capture().
+        flag_movers_against_baseline();
+        return -1.f;
     case Phase::Idle:
     case Phase::Inspect:
     default:
@@ -544,6 +571,38 @@ void start_baseline(float baseline_seconds)
     ensure_flight_loop_registered();
     log_msg("[xp_sherlock] Baseline started\n");
     (void)logf;
+}
+
+void start_noise_capture()
+{
+    // Not meaningful mid-baseline or mid-record.
+    if (s_phase == Phase::Baseline || s_phase == Phase::Record)
+        return;
+    if (!dataref_index::is_built())
+        dataref_index::rebuild();
+    // Seed the reference arrays if the user hasn't taken a baseline yet, so we
+    // have something to diff against. The existing ignore-set (ambient noise +
+    // any prior captures) is preserved — capture is additive by design.
+    ensure_baseline_arrays_seeded();
+    s_phase = Phase::NoiseCapture;
+    ensure_flight_loop_registered();
+    XPLMDebugString("[xp_sherlock] Noise capture started - drive the actions you want excluded, then Stop.\n");
+}
+
+void stop_noise_capture()
+{
+    if (s_phase != Phase::NoiseCapture)
+        return;
+    s_phase = Phase::Idle;
+    unregister_flight_loop_if_needed();
+    int ignored = 0;
+    for (bool b : s_baseline_changed)
+        if (b)
+            ++ignored;
+    char msg[160];
+    snprintf(msg, sizeof(msg),
+             "[xp_sherlock] Noise capture stopped: %d refs now excluded as noise.\n", ignored);
+    XPLMDebugString(msg);
 }
 
 bool start_record(bool expect_bidirectional, int expected_clicks)

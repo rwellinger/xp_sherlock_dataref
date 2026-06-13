@@ -27,7 +27,9 @@
 #include "ui.hpp"
 #include <XPLM/XPLMDisplay.h>
 #include <XPLM/XPLMMenus.h>
+#include <XPLM/XPLMPlanes.h>
 #include <XPLM/XPLMPlugin.h>
+#include <XPLM/XPLMProcessing.h>
 #include <XPLM/XPLMUtilities.h>
 #include <cstdint>
 #include <cstdio>
@@ -58,6 +60,45 @@ static int CmdToggle(XPLMCommandRef, XPLMCommandPhase phase, void *)
     if (phase == xplm_CommandBegin)
         ui::toggle();
     return 1;
+}
+
+// ── Deferred re-enumeration on aircraft load ─────────────────────────────────
+// When the user swaps aircraft, the new plane registers its (often thousands of)
+// custom datarefs and creates its commands lazily — and its *_Commands.txt is
+// only meaningful once that plane is the active one. A snapshot taken against a
+// stale index silently misses all of them. We therefore re-enumerate on
+// XPLM_MSG_PLANE_LOADED, but deferred by a short delay via a one-shot flight
+// loop: the message can arrive slightly before registration is complete, and a
+// flight loop also guarantees we run on the main thread (XPLM enumeration is not
+// thread-safe to call from the message handler context otherwise).
+static bool s_reenum_scheduled = false;
+
+// Chosen empirically: 1 s is comfortably past the point where stock + payware
+// aircraft finish registering their refs after PLANE_LOADED, while still feeling
+// instant to the user.
+static constexpr float kReenumDelaySeconds = 1.0f;
+
+static float ReenumFlightLoop(float, float, int, void *)
+{
+    ui::reenumerate();
+    // Returning 0 only deactivates the callback (it stays registered, per the
+    // XPLM contract); unregister explicitly so nothing lingers.
+    XPLMUnregisterFlightLoopCallback(ReenumFlightLoop, nullptr);
+    s_reenum_scheduled = false;
+    return 0.f;
+}
+
+static void schedule_reenumerate()
+{
+    if (s_reenum_scheduled)
+    {
+        // Plane reloaded again before the pending tick fired — push the delay
+        // back instead of registering a second callback.
+        XPLMSetFlightLoopCallbackInterval(ReenumFlightLoop, kReenumDelaySeconds, 1, nullptr);
+        return;
+    }
+    XPLMRegisterFlightLoopCallback(ReenumFlightLoop, kReenumDelaySeconds, nullptr);
+    s_reenum_scheduled = true;
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -112,6 +153,13 @@ PLUGIN_API void XPluginStop()
 {
     ui::stop();
     recorder::stop();
+    // Cancel a pending deferred re-enumeration so we don't leave a registered
+    // flight-loop callback behind on unload.
+    if (s_reenum_scheduled)
+    {
+        XPLMUnregisterFlightLoopCallback(ReenumFlightLoop, nullptr);
+        s_reenum_scheduled = false;
+    }
     // command_recorder::disable() is symmetric to enable() in XPluginEnable;
     // call it here too in case Enable was never reached (unusual but defensive).
     command_recorder::disable();
@@ -132,4 +180,14 @@ PLUGIN_API int XPluginEnable()
     return 1;
 }
 PLUGIN_API void XPluginDisable() { command_recorder::disable(); }
-PLUGIN_API void XPluginReceiveMessage(XPLMPluginID, int, void *) {}
+
+PLUGIN_API void XPluginReceiveMessage(XPLMPluginID, int msg, void *param)
+{
+    // Re-enumerate datarefs + commands when the USER aircraft changes, so a
+    // freshly loaded plane's custom refs/commands become visible automatically.
+    if (msg == XPLM_MSG_PLANE_LOADED &&
+        reinterpret_cast<intptr_t>(param) == XPLM_USER_AIRCRAFT)
+    {
+        schedule_reenumerate();
+    }
+}
