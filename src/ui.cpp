@@ -309,10 +309,10 @@ const char *phase_label(Phase p)
     switch (p)
     {
     case Phase::Idle:         return "Idle";
-    case Phase::Baseline:     return "Baseline";
+    case Phase::Baseline:     return "Learning";
     case Phase::Record:       return "Record";
     case Phase::Inspect:      return "Inspect";
-    case Phase::NoiseCapture: return "Mark Noise";
+    case Phase::NoiseCapture: return "Learning Ambient";
     }
     return "?";
 }
@@ -322,9 +322,9 @@ std::string hint_text(Phase p)
     switch (p)
     {
     case Phase::Idle:
-        return "Sit still. Take a snapshot to learn what's noisy.";
+        return "Sit still, then Learn Baseline to model the environment.";
     case Phase::Baseline:
-        return "Hold still - building noise ignore-set...";
+        return "Hold still - learning baseline...";
     case Phase::Record:
         if (recorder::auto_stop_enabled())
             return "Flip the switch THREE times (e.g. ON-OFF-ON). Click 'I Acted Now' before each flip. "
@@ -335,8 +335,8 @@ std::string hint_text(Phase p)
     case Phase::Inspect:
         return "Top-ranked DataRef is most likely the cause. Lower ranks may be downstream effects.";
     case Phase::NoiseCapture:
-        return "Capturing noise: drive everything you want EXCLUDED (e.g. power the bus). "
-               "Every ref that moves is added to the ignore-set. Click 'Stop Noise' when done, then Record your target.";
+        return "Learning the ambient profile - drive everything you want filtered out (e.g. power the bus). "
+               "Every ref that moves is added to the ignore-set. Click 'Stop' when done, then Record your target.";
     }
     return "";
 }
@@ -524,7 +524,7 @@ void draw_status_bar()
     }
     else if (st.phase == Phase::NoiseCapture)
     {
-        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "   capturing... %d refs excluded as noise",
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "   learning ambient... %d refs profiled",
                            st.ignored_count);
     }
 
@@ -560,7 +560,7 @@ void draw_button_row()
     ImGui::SameLine(kLabelCol);
 
     ImGui::BeginDisabled(!can_baseline);
-    if (ImGui::Button("Take Snapshot"))
+    if (ImGui::Button("Learn Baseline"))
     {
         // Re-enumerate first if exclusion filters have changed since the last
         // index build. Doing it here (rather than inside start_baseline) keeps
@@ -600,13 +600,16 @@ void draw_button_row()
     // enabled so the user can always end the capture.
     if (is_noise)
     {
-        if (ImGui::Button("Stop Noise"))
+        // Unique ImGui ID: the Record "Stop" button above is still rendered
+        // (disabled) in this phase, so a bare "Stop" label would collide with
+        // its ID. The "##noise" suffix is hidden from the visible label.
+        if (ImGui::Button("Stop##noise"))
             recorder::stop_noise_capture();
     }
     else
     {
         ImGui::BeginDisabled(!can_noise);
-        if (ImGui::Button("Mark Noise"))
+        if (ImGui::Button("Learn Ambient"))
         {
             s_selected_candidate = -1;
             recorder::start_noise_capture();
@@ -614,7 +617,7 @@ void draw_button_row()
         ImGui::EndDisabled();
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Subtract a cascade: start, drive everything you want IGNORED (e.g. power the bus),\n"
+        ImGui::SetTooltip("Learn an ambient profile: start, drive everything you want filtered out (e.g. power the bus),\n"
                           "then Stop. Those refs are excluded from the next Record so only your target stands out.");
     ImGui::SameLine();
 
