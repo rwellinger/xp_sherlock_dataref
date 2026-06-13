@@ -27,6 +27,17 @@ the switch you just flipped.
 Open the window via **Plugins → DataRef Detective**, or bind the command
 `xp_sherlock_dataref/window/toggle`.
 
+The controls are grouped so first-time users only ever see two short rows:
+
+- **Workflow** — the main sequence: **Take Snapshot → Record → Stop**.
+- **Refine** — optional helpers: **Mark Noise** (subtract a cascade, see below)
+  and **I Acted Now** (timestamp your action).
+- **Advanced** (collapsed) — record mode (bool / rotary), auto-stop, **Reset**,
+  **Re-enumerate**, and the snapshot noise-namespace filters.
+
+A **Hint** line in the status bar always names the next step for the current
+phase, so you don't have to memorise the order.
+
 ### 1. Take Snapshot (Baseline, ~2.5 s)
 
 Click **Take Snapshot** while the cockpit is settled (engines off, electrical
@@ -57,6 +68,10 @@ The candidate table shows ranked DataRefs:
 - **Below** → may be a **downstream effect** (e.g. bus voltage rising as a
   consequence of the breaker being closed) — still shown, but ranked lower.
 
+The Delta column's **`now` value is read live every frame**. After Record stops
+you can re-flip the switch and watch which candidate still reacts — its value
+moves and turns yellow — a quick way to break ties within a coupled cluster.
+
 Select a candidate and use the Test panel to write a value:
 
 - The plugin first calls `XPLMCanWriteDataRef`.
@@ -69,6 +84,25 @@ Select a candidate and use the Test panel to write a value:
 
 Use **Copy path** to copy the raw DataRef path, or **Copy code snippet** to
 copy a paste-ready `XPLMFindDataRef("...")` block.
+
+## Refine: Mark Noise (subtract a cascade)
+
+Complex aircraft turn one switch into a *cascade*: flipping GPU power, for
+example, lights up dozens of downstream refs (lights, radios, annunciators) that
+all correlate with your click and bury the one ref you actually want. **Mark
+Noise** subtracts that cascade.
+
+1. Click **Mark Noise**.
+2. Drive everything you want **ignored** — e.g. power the bus another way so the
+   same lights/radios come on. Every ref that moves is added to the ignore set.
+3. Click **Stop Noise**, then **Record** your real target. The shared cascade is
+   gone, so only the switch's own ref stands out.
+
+It is **target-blind**: you never need to know which ref is the target, only how
+to reproduce the noise. Captures are **additive** — repeat Mark Noise to keep
+narrowing — and the status bar shows how many refs are currently excluded.
+Together with the live `now` values above, this turns a 120-candidate cascade
+into a short, checkable shortlist.
 
 ## Honest caveats (v1)
 
