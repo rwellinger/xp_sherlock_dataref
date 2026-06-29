@@ -10,7 +10,9 @@ CATCH2_SENTINEL := vendor/catch2/catch_amalgamated.hpp
 
 CATCH2_VERSION := 3.7.1
 
-.PHONY: help all setup build test install format lint sanitize build-windows release release-build cleanup-tags cleanup-runs clean distclean
+SKUNK_DIR := build/skunkcrafts
+
+.PHONY: help all setup build test install format lint sanitize build-windows skunkcrafts release release-build cleanup-tags cleanup-runs clean distclean
 
 .DEFAULT_GOAL := help
 
@@ -38,6 +40,7 @@ help:
 	@echo "  build-windows   Windows x64 build (used by CI)"
 	@echo ""
 	@echo "Release:"
+	@echo "  skunkcrafts             Stage a SkunkCrafts update tree from the install (verify only)"
 	@echo "  release VERSION=x.y.z   Tag + push release (commits VERSION.txt)"
 	@echo "  release-build           Local release build (-DRELEASE=ON)"
 	@echo "  cleanup-tags            Prune local tags removed on origin"
@@ -169,6 +172,27 @@ sanitize: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 build-windows: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	cmake -B build -A x64
 	cmake --build build --config Release
+
+# ── SkunkCrafts update tree ───────────────────────────────────────────────────
+# Stages a publishable SkunkCrafts tree from the installed plugin and writes the
+# updater control files into it. NOTE: 'make install' only deploys mac_x64, so
+# locally this produces a mac-only tree — it exists to verify control-file
+# generation. The real multi-platform tree is staged in CI from the release job.
+skunkcrafts:
+	@if [ ! -d "$(PLUGIN_DIR)" ]; then \
+	    echo "Plugin not installed at '$(PLUGIN_DIR)'. Run 'make install' first."; exit 1; \
+	fi
+	@VER="$(VERSION)"; \
+	if [ -z "$$VER" ] && [ -f VERSION.txt ]; then VER="$$(cat VERSION.txt)"; fi; \
+	if [ -z "$$VER" ]; then echo "No version. Set VERSION=x.y.z or VERSION.txt."; exit 1; fi; \
+	echo "=== Staging SkunkCrafts release tree ($$VER) ==="; \
+	rm -rf "$(SKUNK_DIR)"; mkdir -p "$(SKUNK_DIR)"; \
+	rsync -a \
+	    --exclude '.DS_Store' \
+	    --exclude 'skunkcrafts_updater*' \
+	    "$(PLUGIN_DIR)/" "$(SKUNK_DIR)/"; \
+	python3 tools/skunkcrafts/generate.py --tree "$(SKUNK_DIR)" --version "$$VER"; \
+	echo "Staged release tree at $(SKUNK_DIR)/ (version $$VER)."
 
 # ── Release ───────────────────────────────────────────────────────────────────
 release:
