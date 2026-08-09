@@ -42,11 +42,16 @@ inline const char *type_name(RefType t)
 {
     switch (t)
     {
-    case RefType::Int:            return "Int";
-    case RefType::Float:          return "Float";
-    case RefType::Double:         return "Double";
-    case RefType::IntArrayElem:   return "I[]";
-    case RefType::FloatArrayElem: return "F[]";
+    case RefType::Int:
+        return "Int";
+    case RefType::Float:
+        return "Float";
+    case RefType::Double:
+        return "Double";
+    case RefType::IntArrayElem:
+        return "I[]";
+    case RefType::FloatArrayElem:
+        return "F[]";
     }
     return "?";
 }
@@ -92,26 +97,23 @@ enum class Kind : uint8_t
     Command,
 };
 
-inline const char *kind_name(Kind k)
-{
-    return (k == Kind::Command) ? "Command" : "DataRef";
-}
+inline const char *kind_name(Kind k) { return (k == Kind::Command) ? "Command" : "DataRef"; }
 
 // A single command fire observed during the Record window. Phase encodes the
 // XPLM command lifecycle (Begin=0, Continue=1, End=2) — we keep all three so
 // the UI can show users the dominant phase.
 struct CommandFireEvent
 {
-    uint32_t frame    = 0;
-    float    t_sec    = 0.f;
-    uint8_t  phase    = 0;
+    uint32_t frame = 0;
+    float    t_sec = 0.f;
+    uint8_t  phase = 0;
 };
 
 struct CommandEventStream
 {
     uint32_t                      command_idx = 0;
     std::vector<CommandFireEvent> events;
-    uint8_t                       last_phase  = 0xFF;
+    uint8_t                       last_phase = 0xFF;
 };
 
 // Parallel-array companion to CommandEventStream, mirroring how RefMeta

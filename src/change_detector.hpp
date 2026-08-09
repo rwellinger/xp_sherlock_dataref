@@ -58,10 +58,7 @@ inline bool exceeds_epsilon(RefType type, SampleValue prev, SampleValue cur)
     return false;
 }
 
-inline bool within_epsilon(RefType type, SampleValue a, SampleValue b)
-{
-    return !exceeds_epsilon(type, a, b);
-}
+inline bool within_epsilon(RefType type, SampleValue a, SampleValue b) { return !exceeds_epsilon(type, a, b); }
 
 inline int8_t direction_of(RefType type, SampleValue from, SampleValue to)
 {
@@ -91,20 +88,24 @@ inline int8_t direction_of(RefType type, SampleValue from, SampleValue to)
 //                           (restart count without drifting the stable baseline)
 struct ChangeDetector
 {
-    enum class Phase : uint8_t { Stable, Candidate };
+    enum class Phase : uint8_t
+    {
+        Stable,
+        Candidate
+    };
 
     RefType     type;
-    SampleValue stable_value;     // last confirmed-stable value
-    SampleValue candidate_value;  // currently held but not yet confirmed
+    SampleValue stable_value;    // last confirmed-stable value
+    SampleValue candidate_value; // currently held but not yet confirmed
     Phase       phase     = Phase::Stable;
     int         hold_left = 0;
 
     void init(RefType t, SampleValue v)
     {
-        type           = t;
-        stable_value   = v;
-        phase          = Phase::Stable;
-        hold_left      = 0;
+        type         = t;
+        stable_value = v;
+        phase        = Phase::Stable;
+        hold_left    = 0;
     }
 
     // Feed one sample. If a change is confirmed, fills `out` and returns true.

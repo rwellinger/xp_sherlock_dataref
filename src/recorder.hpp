@@ -102,18 +102,18 @@ const LogicalRef             *logical_ref_at(std::size_t logical_idx);
 // Status info for the UI status bar.
 struct Status
 {
-    Phase phase                 = Phase::Idle;
-    float baseline_elapsed_s    = 0.f;
-    float baseline_total_s      = 0.f;
-    float record_elapsed_s      = 0.f;
-    int   ignored_count         = 0;
-    int   watched_count         = 0;
-    int   candidate_count       = 0;
-    int   total_logical         = 0;
-    bool  baseline_in_progress  = false;
-    bool  auto_stop_armed       = false;
-    int   best_events_so_far    = 0; // largest event-count across all streams during Record
-    int   anchors_set           = 0; // how many "I Acted Now" stamps the user has placed
+    Phase phase                = Phase::Idle;
+    float baseline_elapsed_s   = 0.f;
+    float baseline_total_s     = 0.f;
+    float record_elapsed_s     = 0.f;
+    int   ignored_count        = 0;
+    int   watched_count        = 0;
+    int   candidate_count      = 0;
+    int   total_logical        = 0;
+    bool  baseline_in_progress = false;
+    bool  auto_stop_armed      = false;
+    int   best_events_so_far   = 0; // largest event-count across all streams during Record
+    int   anchors_set          = 0; // how many "I Acted Now" stamps the user has placed
 };
 Status status();
 

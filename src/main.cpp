@@ -46,7 +46,7 @@ static int DrawCallback(XPLMDrawingPhase, int, void *)
 }
 
 // ── Menu + Command ───────────────────────────────────────────────────────────
-static XPLMCommandRef s_cmd_toggle = nullptr;
+static XPLMCommandRef s_cmd_toggle  = nullptr;
 static XPLMMenuID     s_plugin_menu = nullptr;
 
 static void PluginMenuHandler(void *, void *item_ref)
@@ -127,7 +127,7 @@ PLUGIN_API int XPluginStart(char *outName, char *outSig, char *outDesc)
 
         XPLMMenuID plugins_menu = XPLMFindPluginsMenu();
         int        sub          = XPLMAppendMenuItem(plugins_menu, "DataRef Detective", nullptr, 0);
-        s_plugin_menu = XPLMCreateMenu("DataRef Detective", plugins_menu, sub, PluginMenuHandler, nullptr);
+        s_plugin_menu           = XPLMCreateMenu("DataRef Detective", plugins_menu, sub, PluginMenuHandler, nullptr);
         XPLMAppendMenuItem(s_plugin_menu, "Open / Close Window", reinterpret_cast<void *>(1), 0);
 
         char banner[128];
@@ -138,8 +138,7 @@ PLUGIN_API int XPluginStart(char *outName, char *outSig, char *outDesc)
     }
     catch (const std::exception &e)
     {
-        XPLMDebugString(
-            ("[xp_sherlock] FATAL: XPluginStart threw: " + std::string(e.what()) + "\n").c_str());
+        XPLMDebugString(("[xp_sherlock] FATAL: XPluginStart threw: " + std::string(e.what()) + "\n").c_str());
         return 0;
     }
     catch (...)
@@ -185,8 +184,7 @@ PLUGIN_API void XPluginReceiveMessage(XPLMPluginID, int msg, void *param)
 {
     // Re-enumerate datarefs + commands when the USER aircraft changes, so a
     // freshly loaded plane's custom refs/commands become visible automatically.
-    if (msg == XPLM_MSG_PLANE_LOADED &&
-        reinterpret_cast<intptr_t>(param) == XPLM_USER_AIRCRAFT)
+    if (msg == XPLM_MSG_PLANE_LOADED && reinterpret_cast<intptr_t>(param) == XPLM_USER_AIRCRAFT)
     {
         schedule_reenumerate();
     }

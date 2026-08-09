@@ -56,16 +56,16 @@ namespace command_index
 // `set_user_exclusions()` and the hardcoded sim/private/ filter.
 void rebuild();
 
-bool                            is_built();
+bool                             is_built();
 const std::vector<CommandEntry> &all();
 std::size_t                      size();
 
 // Apply the same UI exclusion-prefix list that drives dataref_index — so the
 // snapshot filter checkboxes affect both indexes consistently.
-void                            set_user_exclusions(std::vector<std::string> prefixes);
+void set_user_exclusions(std::vector<std::string> prefixes);
 
 // Paste-ready C snippet for a single command. Used by UI's "Copy code snippet".
-std::string                     code_snippet(const CommandEntry &cmd);
+std::string code_snippet(const CommandEntry &cmd);
 
 } // namespace command_index
 } // namespace xp_sherlock

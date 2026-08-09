@@ -66,8 +66,7 @@ std::vector<Candidate> rank(const std::vector<EventStream> &streams, const std::
 // `metas` MUST be parallel to `streams`. Returns candidates with score > 0,
 // sorted descending by score. The returned Candidates have kind=Command.
 std::vector<Candidate> rank_commands(const std::vector<CommandEventStream> &streams,
-                                     const std::vector<CommandRefMeta>     &metas,
-                                     const AnchorList                      &anchors,
-                                     const Hints                           &hints);
+                                     const std::vector<CommandRefMeta> &metas, const AnchorList &anchors,
+                                     const Hints &hints);
 
 } // namespace xp_sherlock

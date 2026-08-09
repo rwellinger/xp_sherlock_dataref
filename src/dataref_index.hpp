@@ -38,7 +38,7 @@ struct LogicalRef
     RefType     type        = RefType::Int;
     int         array_index = -1; // -1 for scalars
     bool        is_writable = false;
-    std::string name;          // base name, shared across array elements
+    std::string name;         // base name, shared across array elements
     std::string display_path; // name or name[i]
 };
 

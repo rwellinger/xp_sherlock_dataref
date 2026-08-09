@@ -141,8 +141,7 @@ const char *const FALLBACK_COMMANDS[] = {
     "sim/autopilot/altitude_hold",
     "sim/autopilot/autothrottle_toggle",
 };
-constexpr std::size_t FALLBACK_COMMAND_COUNT =
-    sizeof(FALLBACK_COMMANDS) / sizeof(FALLBACK_COMMANDS[0]);
+constexpr std::size_t FALLBACK_COMMAND_COUNT = sizeof(FALLBACK_COMMANDS) / sizeof(FALLBACK_COMMANDS[0]);
 
 // Try `name`; if found, push CommandEntry to s_index and return true.
 bool try_register(const std::string &name, const std::string &desc)
@@ -246,8 +245,7 @@ bool ends_with_ci(const std::string &s, const char *suffix)
     const std::size_t off = s.size() - n;
     for (std::size_t i = 0; i < n; ++i)
     {
-        if (std::tolower(static_cast<unsigned char>(s[off + i])) !=
-            std::tolower(static_cast<unsigned char>(suffix[i])))
+        if (std::tolower(static_cast<unsigned char>(s[off + i])) != std::tolower(static_cast<unsigned char>(suffix[i])))
             return false;
     }
     return true;
@@ -258,8 +256,8 @@ bool ends_with_ci(const std::string &s, const char *suffix)
 // in XPluginStart) so the path is a real POSIX/Windows path.
 std::string user_aircraft_dir()
 {
-    char file_name[256]  = {0};
-    char acf_path[1024]  = {0};
+    char file_name[256] = {0};
+    char acf_path[1024] = {0};
     XPLMGetNthAircraftModel(XPLM_USER_AIRCRAFT, file_name, acf_path);
     std::string p = acf_path;
     if (p.empty())
@@ -287,9 +285,8 @@ void rebuild()
     if (!process_command_file(path, global))
     {
         used_fallback = true;
-        XPLMDebugString(
-            "[xp_sherlock] Commands.txt not found - falling back to embedded mini-list. "
-            "Command detection coverage will be limited.\n");
+        XPLMDebugString("[xp_sherlock] Commands.txt not found - falling back to embedded mini-list. "
+                        "Command detection coverage will be limited.\n");
         for (std::size_t i = 0; i < FALLBACK_COMMAND_COUNT; ++i)
         {
             ++global.parsed;
@@ -309,8 +306,8 @@ void rebuild()
     const std::string ac_dir            = user_aircraft_dir();
     if (!ac_dir.empty())
     {
-        std::error_code              ec;
-        std::filesystem::directory_iterator it(ac_dir, ec);
+        std::error_code                           ec;
+        std::filesystem::directory_iterator       it(ac_dir, ec);
         const std::filesystem::directory_iterator end;
         for (; !ec && it != end; it.increment(ec))
         {
@@ -343,8 +340,8 @@ void rebuild()
         snprintf(banner, sizeof(banner),
                  "[xp_sherlock] Command index: global %s (%d parsed, %d resolved, %d filtered); "
                  "aircraft files: %d (%d resolved). Total indexed: %zu.\n",
-                 path.c_str(), global.parsed, global.resolved, global.skipped_filter,
-                 aircraft_files, aircraft_resolved, s_index.size());
+                 path.c_str(), global.parsed, global.resolved, global.skipped_filter, aircraft_files, aircraft_resolved,
+                 s_index.size());
     }
     XPLMDebugString(banner);
     XPLMDebugString("[xp_sherlock] Note: late-binding aircraft/plugin commands may not be present yet. "
@@ -353,20 +350,16 @@ void rebuild()
     s_built = true;
 }
 
-bool                              is_built() { return s_built; }
-const std::vector<CommandEntry>  &all()      { return s_index; }
-std::size_t                       size()     { return s_index.size(); }
+bool                             is_built() { return s_built; }
+const std::vector<CommandEntry> &all() { return s_index; }
+std::size_t                      size() { return s_index.size(); }
 
-void set_user_exclusions(std::vector<std::string> prefixes)
-{
-    s_user_exclusions = std::move(prefixes);
-}
+void set_user_exclusions(std::vector<std::string> prefixes) { s_user_exclusions = std::move(prefixes); }
 
 std::string code_snippet(const CommandEntry &cmd)
 {
     char buf[1400];
-    snprintf(buf, sizeof(buf),
-             "XPLMCommandRef cmd = XPLMFindCommand(\"%s\");\nXPLMCommandOnce(cmd);",
+    snprintf(buf, sizeof(buf), "XPLMCommandRef cmd = XPLMFindCommand(\"%s\");\nXPLMCommandOnce(cmd);",
              cmd.name.c_str());
     return buf;
 }

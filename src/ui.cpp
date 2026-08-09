@@ -48,9 +48,9 @@ namespace
 {
 
 // ── XPLM window pattern (mirrors xp_pilot logbook_ui.cpp) ────────────────────
-XPLMWindowID  s_wnd        = nullptr;
-ImGuiContext *s_imgui_ctx  = nullptr;
-bool          s_open       = false;
+XPLMWindowID  s_wnd       = nullptr;
+ImGuiContext *s_imgui_ctx = nullptr;
+bool          s_open      = false;
 
 double s_last_frame_time = 0.0;
 
@@ -72,9 +72,9 @@ int    s_write_int    = 1;
 float  s_write_float  = 1.0f;
 double s_write_double = 1.0;
 
-bool        s_last_write_done    = false;
+bool        s_last_write_done     = false;
 bool        s_last_write_writable = false;
-SampleValue s_last_readback      = {};
+SampleValue s_last_readback       = {};
 
 // ── Snapshot exclusion filters (checkboxes) ──────────────────────────────────
 //
@@ -94,29 +94,28 @@ struct ExclusionCategory
 
 constexpr ExclusionCategory s_exclusion_categories[] = {
     {"Flight model (positions, velocities, forces)", "sim/flightmodel/", "sim/flightmodel2/", true},
-    {"Aircraft static config",                       "sim/aircraft/",    "",                  true},
-    {"Airfoil tables (aero coefficients)",           "sim/airfoils/",    "",                  true},
-    {"Weather & atmosphere",                         "sim/weather/",     "sim/atmosphere/",   true},
-    {"Joystick raw input",                           "sim/joystick/",    "",                  true},
-    {"Network / multiplayer",                        "sim/network/",     "sim/multiplayer/",  true},
-    {"World / terrain",                              "sim/world/",       "",                  true},
-    {"Version info",                                 "sim/version/",     "",                  true},
-    {"Test scaffolding",                             "sim/test/",        "",                  true},
-    {"Time",                                         "sim/time/",        "",                  false},
-    {"Graphics / rendering",                         "sim/graphics/",    "",                  false},
-    {"Operation",                                    "sim/operation/",   "",                  false},
+    {"Aircraft static config", "sim/aircraft/", "", true},
+    {"Airfoil tables (aero coefficients)", "sim/airfoils/", "", true},
+    {"Weather & atmosphere", "sim/weather/", "sim/atmosphere/", true},
+    {"Joystick raw input", "sim/joystick/", "", true},
+    {"Network / multiplayer", "sim/network/", "sim/multiplayer/", true},
+    {"World / terrain", "sim/world/", "", true},
+    {"Version info", "sim/version/", "", true},
+    {"Test scaffolding", "sim/test/", "", true},
+    {"Time", "sim/time/", "", false},
+    {"Graphics / rendering", "sim/graphics/", "", false},
+    {"Operation", "sim/operation/", "", false},
 };
-constexpr std::size_t s_exclusion_category_count =
-    sizeof(s_exclusion_categories) / sizeof(s_exclusion_categories[0]);
+constexpr std::size_t s_exclusion_category_count = sizeof(s_exclusion_categories) / sizeof(s_exclusion_categories[0]);
 
-bool s_exclude_flags[s_exclusion_category_count] = {}; // initialised in init()
-bool s_filters_dirty = true; // forces rebuild() before first snapshot, then per-toggle
+bool s_exclude_flags[s_exclusion_category_count] = {};   // initialised in init()
+bool s_filters_dirty                             = true; // forces rebuild() before first snapshot, then per-toggle
 
 // ── Result filter (live substring filter on candidate table) ─────────────────
 char s_result_filter[128] = "";
-bool s_show_datarefs   = true;
-bool s_show_commands   = true;
-bool s_writable_only   = false;
+bool s_show_datarefs      = true;
+bool s_show_commands      = true;
+bool s_writable_only      = false;
 
 // ── Capture-window callbacks ─────────────────────────────────────────────────
 //
@@ -244,18 +243,29 @@ void KeyCallback(XPLMWindowID, char key, XPLMKeyFlags flags, char vkey, void *, 
     // matching key-up event ImGui's internal repeat state can latch and the
     // key appears to be held down forever — symptom: backspace deletes the
     // whole field instead of one char.
-    auto edge = [&](ImGuiKey k) {
-        if (down) io.AddKeyEvent(k, true);
-        if (up)   io.AddKeyEvent(k, false);
+    auto edge = [&](ImGuiKey k)
+    {
+        if (down)
+            io.AddKeyEvent(k, true);
+        if (up)
+            io.AddKeyEvent(k, false);
     };
-    if (vkey == XPLM_VK_BACK)   edge(ImGuiKey_Backspace);
-    if (vkey == XPLM_VK_DELETE) edge(ImGuiKey_Delete);
-    if (vkey == XPLM_VK_RETURN) edge(ImGuiKey_Enter);
-    if (vkey == XPLM_VK_LEFT)   edge(ImGuiKey_LeftArrow);
-    if (vkey == XPLM_VK_RIGHT)  edge(ImGuiKey_RightArrow);
-    if (vkey == XPLM_VK_HOME)   edge(ImGuiKey_Home);
-    if (vkey == XPLM_VK_END)    edge(ImGuiKey_End);
-    if (vkey == XPLM_VK_TAB)    edge(ImGuiKey_Tab);
+    if (vkey == XPLM_VK_BACK)
+        edge(ImGuiKey_Backspace);
+    if (vkey == XPLM_VK_DELETE)
+        edge(ImGuiKey_Delete);
+    if (vkey == XPLM_VK_RETURN)
+        edge(ImGuiKey_Enter);
+    if (vkey == XPLM_VK_LEFT)
+        edge(ImGuiKey_LeftArrow);
+    if (vkey == XPLM_VK_RIGHT)
+        edge(ImGuiKey_RightArrow);
+    if (vkey == XPLM_VK_HOME)
+        edge(ImGuiKey_Home);
+    if (vkey == XPLM_VK_END)
+        edge(ImGuiKey_End);
+    if (vkey == XPLM_VK_TAB)
+        edge(ImGuiKey_Tab);
 }
 
 // Synchronise XPLM keyboard focus with ImGui's active text-input state.
@@ -308,11 +318,16 @@ const char *phase_label(Phase p)
 {
     switch (p)
     {
-    case Phase::Idle:         return "Idle";
-    case Phase::Baseline:     return "Learning";
-    case Phase::Record:       return "Record";
-    case Phase::Inspect:      return "Inspect";
-    case Phase::NoiseCapture: return "Learning Ambient";
+    case Phase::Idle:
+        return "Idle";
+    case Phase::Baseline:
+        return "Learning";
+    case Phase::Record:
+        return "Record";
+    case Phase::Inspect:
+        return "Inspect";
+    case Phase::NoiseCapture:
+        return "Learning Ambient";
     }
     return "?";
 }
@@ -368,10 +383,14 @@ const char *direction_icon(const Candidate &c)
         // XPLM phase: Begin=0, Continue=1, End=2.
         switch (c.last_phase)
         {
-        case 0: return ">";
-        case 1: return "||";
-        case 2: return "<";
-        default: return "--";
+        case 0:
+            return ">";
+        case 1:
+            return "||";
+        case 2:
+            return "<";
+        default:
+            return "--";
         }
     }
     if (c.bidirectional)
@@ -453,8 +472,10 @@ bool path_matches(const std::string &path, const char *needle)
         {
             char a = path[i + k];
             char b = needle[k];
-            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
-            if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+            if (a >= 'A' && a <= 'Z')
+                a = static_cast<char>(a + 32);
+            if (b >= 'A' && b <= 'Z')
+                b = static_cast<char>(b + 32);
             if (a != b)
                 break;
         }
@@ -495,8 +516,7 @@ void draw_snapshot_filters()
 
     if (s_filters_dirty)
     {
-        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
-                           "Snapshot will re-enumerate to apply filter changes.");
+        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Snapshot will re-enumerate to apply filter changes.");
     }
 }
 
@@ -515,8 +535,8 @@ void draw_status_bar()
         // Show the live max-events counter so the user knows whether their
         // switch flips are being detected. Auto-stop needs >= 3 events on
         // some ref (for bool mode) or expected_clicks events (rotary).
-        ImGui::Text("   %.1f s   |   best ref: %d events   |   anchors: %d",
-                    static_cast<double>(st.record_elapsed_s), st.best_events_so_far, st.anchors_set);
+        ImGui::Text("   %.1f s   |   best ref: %d events   |   anchors: %d", static_cast<double>(st.record_elapsed_s),
+                    st.best_events_so_far, st.anchors_set);
     }
     else if (st.phase == Phase::Inspect)
     {
@@ -524,8 +544,7 @@ void draw_status_bar()
     }
     else if (st.phase == Phase::NoiseCapture)
     {
-        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "   learning ambient... %d refs profiled",
-                           st.ignored_count);
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "   learning ambient... %d refs profiled", st.ignored_count);
     }
 
     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Hint: %s", hint_text(st.phase).c_str());
@@ -550,7 +569,7 @@ void draw_button_row()
     bool can_reset     = (st.phase != Phase::Baseline && !is_noise);
     // "Mark Noise" can start from Idle or Inspect (a baseline is recommended but
     // not required — start_noise_capture seeds its own reference if needed).
-    bool can_noise     = can_baseline;
+    bool can_noise = can_baseline;
 
     // Left-aligned group labels so the two action rows read as a clear sequence.
     constexpr float kLabelCol = 90.f;
@@ -617,8 +636,9 @@ void draw_button_row()
         ImGui::EndDisabled();
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Learn an ambient profile: start, drive everything you want filtered out (e.g. power the bus),\n"
-                          "then Stop. Those refs are excluded from the next Record so only your target stands out.");
+        ImGui::SetTooltip(
+            "Learn an ambient profile: start, drive everything you want filtered out (e.g. power the bus),\n"
+            "then Stop. Those refs are excluded from the next Record so only your target stands out.");
     ImGui::SameLine();
 
     ImGui::BeginDisabled(!can_act);
@@ -644,8 +664,10 @@ void draw_button_row()
         int clicks_edit = (s_expected_clicks == 3) ? 4 : s_expected_clicks;
         if (ImGui::InputInt("##clicks", &clicks_edit, 1, 1))
         {
-            if (clicks_edit < 2) clicks_edit = 2;
-            if (clicks_edit > 16) clicks_edit = 16;
+            if (clicks_edit < 2)
+                clicks_edit = 2;
+            if (clicks_edit > 16)
+                clicks_edit = 16;
             if (s_expected_clicks != 3)
                 s_expected_clicks = clicks_edit;
         }
@@ -696,8 +718,7 @@ void draw_candidates_table()
         if (st.phase == Phase::Inspect)
         {
             ImGui::Spacing();
-            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
-                               "No correlating DataRef or Command found.");
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "No correlating DataRef or Command found.");
             ImGui::TextWrapped("The switch may be handled entirely inside aircraft Lua/SASL with no observable "
                                "DataRef or sim/* Command. Try Re-enumerate after the aircraft has fully loaded - "
                                "plugin commands often register lazily.");
@@ -736,8 +757,8 @@ void draw_candidates_table()
     // different number — this is what keeps Copy path / Copy code snippet
     // unambiguous when something is filtered out.
     ImGui::SetNextItemWidth(300.f);
-    ImGui::InputTextWithHint("##resultfilter", "Filter by keyword (e.g. cockpit)",
-                             s_result_filter, sizeof(s_result_filter));
+    ImGui::InputTextWithHint("##resultfilter", "Filter by keyword (e.g. cockpit)", s_result_filter,
+                             sizeof(s_result_filter));
     ImGui::SameLine();
     ImGui::TextDisabled("(case-insensitive substring on path)");
     if (s_result_filter[0] != '\0')
@@ -752,7 +773,8 @@ void draw_candidates_table()
     // (its value moves and turns yellow) — a quick way to break ties.
     ImGui::TextDisabled("Tip: \"now\" values are live - re-flip the switch to see which candidate still reacts.");
 
-    auto row_visible = [&](const Candidate &c, const std::string &path) -> bool {
+    auto row_visible = [&](const Candidate &c, const std::string &path) -> bool
+    {
         if (c.kind == Kind::DataRef && !s_show_datarefs)
             return false;
         if (c.kind == Kind::Command && !s_show_commands)
@@ -770,15 +792,16 @@ void draw_candidates_table()
     // the reacting ref's value visibly moves while the others stay put — the
     // quickest way to confirm which candidate is really the one. Cheap: one SDK
     // read per visible DataRef row, handle already resolved at enumeration time.
-    auto live_value = [](const Candidate &c, SampleValue &out) -> bool {
+    auto live_value = [](const Candidate &c, SampleValue &out) -> bool
+    {
         if (c.kind != Kind::DataRef)
             return false;
         const LogicalRef *lr = recorder::logical_ref_at(c.logical_ref_idx);
         return lr && dataref_index::read(*lr, out);
     };
 
-    ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
-                            ImGuiTableFlags_Resizable;
+    ImGuiTableFlags flags =
+        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
     ImVec2 table_size(0.f, 280.f);
     if (ImGui::BeginTable("cands", 9, flags, table_size))
     {
@@ -1044,10 +1067,16 @@ void draw_test_panel()
         switch (c.type)
         {
         case RefType::Int:
-        case RefType::IntArrayElem:    v.i = s_write_int;    break;
+        case RefType::IntArrayElem:
+            v.i = s_write_int;
+            break;
         case RefType::Float:
-        case RefType::FloatArrayElem:  v.f = s_write_float;  break;
-        case RefType::Double:          v.d = s_write_double; break;
+        case RefType::FloatArrayElem:
+            v.f = s_write_float;
+            break;
+        case RefType::Double:
+            v.d = s_write_double;
+            break;
         }
         s_last_write_done = recorder::test_write(static_cast<std::size_t>(s_selected_candidate), v,
                                                  s_last_write_writable, s_last_readback);
@@ -1162,21 +1191,22 @@ void draw()
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
-    ImGuiIO &io  = ImGui::GetIO();
-    double   now = get_xp_time();
-    io.DeltaTime = static_cast<float>(std::max(now - s_last_frame_time, 0.001));
-    s_last_frame_time          = now;
-    io.DisplaySize             = ImVec2(static_cast<float>(sw), static_cast<float>(sh));
-    io.DisplayFramebufferScale = ImVec2(static_cast<float>(fb_w) / static_cast<float>(sw),
-                                        static_cast<float>(fb_h) / static_cast<float>(sh));
+    ImGuiIO &io       = ImGui::GetIO();
+    double   now      = get_xp_time();
+    io.DeltaTime      = static_cast<float>(std::max(now - s_last_frame_time, 0.001));
+    s_last_frame_time = now;
+    io.DisplaySize    = ImVec2(static_cast<float>(sw), static_cast<float>(sh));
+    io.DisplayFramebufferScale =
+        ImVec2(static_cast<float>(fb_w) / static_cast<float>(sw), static_cast<float>(fb_h) / static_cast<float>(sh));
 
     ImGui_ImplOpenGL2_NewFrame();
     ImGui::NewFrame();
 
     {
         float win_w = 980.f, win_h = 720.f;
-        ImGui::SetNextWindowPos(ImVec2((static_cast<float>(sw) - win_w) * 0.5f, (static_cast<float>(sh) - win_h) * 0.5f),
-                                ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(
+            ImVec2((static_cast<float>(sw) - win_w) * 0.5f, (static_cast<float>(sh) - win_h) * 0.5f),
+            ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(win_w, win_h), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSizeConstraints(ImVec2(640, 360), ImVec2(3840, 2160));
 

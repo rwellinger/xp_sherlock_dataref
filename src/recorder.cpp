@@ -41,15 +41,15 @@ namespace
 // thousand twitch during baseline. The remaining ~60k all become watched
 // refs. The cost per watched ref is now low (no ring buffer; just a small
 // FSM + empty event vector), so we can afford it.
-constexpr std::size_t MAX_WATCHED       = 200000;
-constexpr int         HOLD_FRAMES       = 4;    // change-detector hold window
-constexpr float       MIN_RECORD_S      = 5.0f; // auto-stop minimum elapsed
-constexpr float       BIDIR_GAP_MIN_S   = 0.2f; // 2nd direction event must be > 200ms after 1st
+constexpr std::size_t MAX_WATCHED     = 200000;
+constexpr int         HOLD_FRAMES     = 4;    // change-detector hold window
+constexpr float       MIN_RECORD_S    = 5.0f; // auto-stop minimum elapsed
+constexpr float       BIDIR_GAP_MIN_S = 0.2f; // 2nd direction event must be > 200ms after 1st
 // Auto-stop minimum events for bool mode. Two events (ON→OFF) is too weak —
 // many noise refs happen to flip once each way during a 2-3 second window
 // and would tie with the real switch. Three events (ON→OFF→ON, the canonical
 // A→B→A→B pattern from the brief) is the discrimination floor.
-constexpr int         MIN_BOOL_EVENTS   = 3;
+constexpr int MIN_BOOL_EVENTS = 3;
 
 // ── Phase state ──────────────────────────────────────────────────────────────
 Phase s_phase = Phase::Idle;
@@ -58,16 +58,16 @@ float s_baseline_total = 0.f;
 float s_baseline_start = 0.f;
 float s_record_start   = 0.f;
 
-bool  s_expect_bidirectional = true;
-int   s_expected_clicks      = 0;
+bool s_expect_bidirectional = true;
+int  s_expected_clicks      = 0;
 
-std::vector<bool>             s_baseline_changed;    // one flag per logical ref (parallel to dataref_index::all())
-std::vector<SampleValue>      s_baseline_value;      // baseline starting value per ref
+std::vector<bool>        s_baseline_changed; // one flag per logical ref (parallel to dataref_index::all())
+std::vector<SampleValue> s_baseline_value;   // baseline starting value per ref
 
-std::vector<std::size_t>      s_watched;             // indices into dataref_index::all()
-std::vector<ChangeDetector>   s_detectors;           // parallel to s_watched
-std::vector<EventStream>      s_streams;             // parallel to s_watched
-std::vector<RefMeta>          s_metas;               // parallel to s_watched
+std::vector<std::size_t>    s_watched;   // indices into dataref_index::all()
+std::vector<ChangeDetector> s_detectors; // parallel to s_watched
+std::vector<EventStream>    s_streams;   // parallel to s_watched
+std::vector<RefMeta>        s_metas;     // parallel to s_watched
 
 // Pre-computed array read groups: one entry per unique base handle that has at
 // least one watched array element. Each entry tells us "read elements
@@ -106,10 +106,7 @@ float now_sec()
     return s_dr_time ? XPLMGetDataf(s_dr_time) : 0.f;
 }
 
-int path_length_of(const std::string &p)
-{
-    return static_cast<int>(p.size());
-}
+int path_length_of(const std::string &p) { return static_cast<int>(p.size()); }
 
 void log_msg(const char *msg) { XPLMDebugString(msg); }
 void logf(const char *fmt, int a = 0, int b = 0, int c = 0)
@@ -154,7 +151,7 @@ bool stream_meets_auto_stop_bar(const EventStream &s, bool expect_bidirectional,
         if (n < expected_clicks)
             return false;
         // Monotonic check: count longest same-sign run inline (don't pull in correlator here)
-        int best = 1, run = 1;
+        int    best = 1, run = 1;
         int8_t prev = s.events.front().direction;
         for (std::size_t i = 1; i < s.events.size(); ++i)
         {
@@ -188,8 +185,8 @@ void build_array_groups()
 
     struct Acc
     {
-        XPLMDataRef handle = nullptr;
-        bool        is_int = false;
+        XPLMDataRef handle  = nullptr;
+        bool        is_int  = false;
         int         min_idx = INT32_MAX;
         int         max_idx = INT32_MIN;
         // logical-watch-index → array-element-index pairs
@@ -224,8 +221,10 @@ void build_array_groups()
             acc->handle = lr.handle;
             acc->is_int = is_int;
         }
-        if (lr.array_index < acc->min_idx) acc->min_idx = lr.array_index;
-        if (lr.array_index > acc->max_idx) acc->max_idx = lr.array_index;
+        if (lr.array_index < acc->min_idx)
+            acc->min_idx = lr.array_index;
+        if (lr.array_index > acc->max_idx)
+            acc->max_idx = lr.array_index;
         acc->entries.emplace_back(static_cast<int>(k), lr.array_index);
     }
 
@@ -233,10 +232,10 @@ void build_array_groups()
     for (auto &a : accs)
     {
         ArrayReadGroup g;
-        g.handle  = a.handle;
-        g.is_int  = a.is_int;
-        g.first   = a.min_idx;
-        g.len     = a.max_idx - a.min_idx + 1;
+        g.handle = a.handle;
+        g.is_int = a.is_int;
+        g.first  = a.min_idx;
+        g.len    = a.max_idx - a.min_idx + 1;
         g.targets.assign(g.len, -1);
         for (auto &p : a.entries)
             g.targets[p.second - g.first] = p.first;
@@ -262,9 +261,9 @@ void allocate_record_state()
 
     for (std::size_t k = 0; k < s_watched.size(); ++k)
     {
-        std::size_t  ridx = s_watched[k];
-        const auto  &lr   = refs[ridx];
-        SampleValue  v0   = (ridx < s_baseline_value.size()) ? s_baseline_value[ridx] : SampleValue{};
+        std::size_t ridx = s_watched[k];
+        const auto &lr   = refs[ridx];
+        SampleValue v0   = (ridx < s_baseline_value.size()) ? s_baseline_value[ridx] : SampleValue{};
         s_detectors[k].init(lr.type, v0);
         s_streams[k].logical_ref_idx = static_cast<uint32_t>(ridx);
         s_streams[k].type            = lr.type;
@@ -273,11 +272,11 @@ void allocate_record_state()
         // Reserve only a small amount — most refs see zero events. Allocating
         // 64*sizeof(ChangeEvent) for 60k refs would be ~150 MB wasted.
         s_streams[k].events.reserve(4);
-        s_metas[k].is_writable     = lr.is_writable;
-        s_metas[k].path_length     = path_length_of(lr.display_path);
-        s_metas[k].type            = lr.type;
-        s_metas[k].baseline_value  = v0;
-        s_metas[k].current_value   = v0;
+        s_metas[k].is_writable    = lr.is_writable;
+        s_metas[k].path_length    = path_length_of(lr.display_path);
+        s_metas[k].type           = lr.type;
+        s_metas[k].baseline_value = v0;
+        s_metas[k].current_value  = v0;
     }
 
     build_array_groups();
@@ -294,8 +293,8 @@ void finalize_inspect()
     // simple concat + sort produces an interleaved ranking. Commands with no
     // Begin fires were filtered out inside rank_commands().
     command_recorder::end_record();
-    const auto &cmd_streams = command_recorder::streams();
-    const auto &cmd_entries = command_index::all();
+    const auto                 &cmd_streams = command_recorder::streams();
+    const auto                 &cmd_entries = command_index::all();
     std::vector<CommandRefMeta> cmd_metas(cmd_streams.size());
     for (std::size_t i = 0; i < cmd_streams.size(); ++i)
     {
@@ -311,8 +310,7 @@ void finalize_inspect()
     snprintf(banner, sizeof(banner),
              "[xp_sherlock] Record stopped: %zu watched, %zu DataRef + %zu Command candidates "
              "(%zu total)\n",
-             s_watched.size(), s_candidates.size() - cmd_candidates.size(),
-             cmd_candidates.size(), s_candidates.size());
+             s_watched.size(), s_candidates.size() - cmd_candidates.size(), cmd_candidates.size(), s_candidates.size());
     XPLMDebugString(banner);
 }
 
@@ -399,7 +397,8 @@ float record_tick(float now)
 
     bool any_ready_to_stop = false;
 
-    auto feed_one = [&](std::size_t k, SampleValue cur) {
+    auto feed_one = [&](std::size_t k, SampleValue cur)
+    {
         s_streams[k].current_value = cur;
         ChangeEvent ev;
         if (s_detectors[k].feed(cur, s_frame_counter, t, HOLD_FRAMES, ev))
@@ -600,8 +599,7 @@ void stop_noise_capture()
         if (b)
             ++ignored;
     char msg[160];
-    snprintf(msg, sizeof(msg),
-             "[xp_sherlock] Noise capture stopped: %d refs now excluded as noise.\n", ignored);
+    snprintf(msg, sizeof(msg), "[xp_sherlock] Noise capture stopped: %d refs now excluded as noise.\n", ignored);
     XPLMDebugString(msg);
 }
 
@@ -619,8 +617,7 @@ bool start_record(bool expect_bidirectional, int expected_clicks)
     if (s_watched.size() > MAX_WATCHED)
     {
         char err[256];
-        snprintf(err, sizeof(err),
-                 "[xp_sherlock] Record refused: %zu watched refs exceed safety cap %zu.\n",
+        snprintf(err, sizeof(err), "[xp_sherlock] Record refused: %zu watched refs exceed safety cap %zu.\n",
                  s_watched.size(), MAX_WATCHED);
         XPLMDebugString(err);
         s_watched.clear();
@@ -750,11 +747,11 @@ Status status()
 
 bool test_write(std::size_t candidate_idx, SampleValue v, bool &writable, SampleValue &readback)
 {
-    writable      = false;
-    readback      = SampleValue{};
+    writable = false;
+    readback = SampleValue{};
     if (candidate_idx >= s_candidates.size())
         return false;
-    const Candidate &c   = s_candidates[candidate_idx];
+    const Candidate  &c  = s_candidates[candidate_idx];
     const LogicalRef *lr = logical_ref_at(c.logical_ref_idx);
     if (!lr)
         return false;

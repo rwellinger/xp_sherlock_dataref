@@ -32,14 +32,14 @@ namespace
 
 // All state lives on the sim main thread — XPLM dispatches command callbacks,
 // flight loops and draw callbacks on the same thread, so no mutex is needed.
-bool                                    s_enabled = false;
-bool                                    s_recording = false;
-bool                                    s_baseline_phase = false;
-float                                   s_record_start_t = 0.f;
-uint32_t                                s_frame_at_start = 0;
-int                                     s_baseline_fires = 0;
+bool     s_enabled        = false;
+bool     s_recording      = false;
+bool     s_baseline_phase = false;
+float    s_record_start_t = 0.f;
+uint32_t s_frame_at_start = 0;
+int      s_baseline_fires = 0;
 
-std::vector<CommandEventStream>         s_streams;
+std::vector<CommandEventStream> s_streams;
 // Track registered handles in lock-step with what we asked for, so disable()
 // can unregister exactly what it registered even if command_index has been
 // rebuilt in between (which would be a contract violation, but we want to
@@ -49,9 +49,9 @@ struct Registration
     XPLMCommandRef handle = nullptr;
     uintptr_t      refcon = 0;
 };
-std::vector<Registration>               s_registrations;
+std::vector<Registration> s_registrations;
 
-XPLMDataRef                             s_dr_time = nullptr;
+XPLMDataRef s_dr_time = nullptr;
 
 float now_sec()
 {
@@ -77,11 +77,11 @@ int command_cb(XPLMCommandRef /*cmd*/, XPLMCommandPhase phase, void *refcon)
     if (idx_raw >= s_streams.size())
         return 1;
 
-    auto idx = static_cast<std::size_t>(idx_raw);
+    auto             idx = static_cast<std::size_t>(idx_raw);
     CommandFireEvent ev{};
-    ev.frame  = s_frame_at_start; // best-effort; recorder owns the live frame counter
-    ev.t_sec  = now_sec() - s_record_start_t;
-    ev.phase  = static_cast<uint8_t>(phase);
+    ev.frame = s_frame_at_start; // best-effort; recorder owns the live frame counter
+    ev.t_sec = now_sec() - s_record_start_t;
+    ev.phase = static_cast<uint8_t>(phase);
     s_streams[idx].events.push_back(ev);
     s_streams[idx].last_phase = ev.phase;
     return 1;
@@ -117,8 +117,7 @@ void enable()
     }
 
     char banner[160];
-    snprintf(banner, sizeof(banner),
-             "[xp_sherlock] command_recorder enabled: %zu handlers registered.\n",
+    snprintf(banner, sizeof(banner), "[xp_sherlock] command_recorder enabled: %zu handlers registered.\n",
              s_registrations.size());
     XPLMDebugString(banner);
     s_enabled = true;
@@ -156,10 +155,7 @@ void begin_record(float record_start_t_sec, uint32_t frame_counter_at_start)
     s_recording = true;
 }
 
-void end_record()
-{
-    s_recording = false;
-}
+void end_record() { s_recording = false; }
 
 void reset()
 {
@@ -174,9 +170,9 @@ void reset()
 
 bool is_enabled() { return s_enabled; }
 
-int  baseline_fires_observed()          { return s_baseline_fires; }
-void clear_baseline_diagnostics()       { s_baseline_fires = 0; }
-void set_baseline_phase(bool on)        { s_baseline_phase = on; }
+int  baseline_fires_observed() { return s_baseline_fires; }
+void clear_baseline_diagnostics() { s_baseline_fires = 0; }
+void set_baseline_phase(bool on) { s_baseline_phase = on; }
 
 const std::vector<CommandEventStream> &streams() { return s_streams; }
 
@@ -190,10 +186,17 @@ bool test_fire(std::size_t command_idx, int mode)
         return false;
     switch (mode)
     {
-    case 0: XPLMCommandOnce(h); break;
-    case 1: XPLMCommandBegin(h); break;
-    case 2: XPLMCommandEnd(h); break;
-    default: return false;
+    case 0:
+        XPLMCommandOnce(h);
+        break;
+    case 1:
+        XPLMCommandBegin(h);
+        break;
+    case 2:
+        XPLMCommandEnd(h);
+        break;
+    default:
+        return false;
     }
     return true;
 }

@@ -105,22 +105,21 @@ void rebuild()
         info.structSize = sizeof(info);
         XPLMGetDataRefInfo(h, &info);
 
-        XPLMDataTypeID types     = info.type;
-        const char    *raw_name  = (info.name != nullptr) ? info.name : "";
-        bool           writable  = XPLMCanWriteDataRef(h) != 0;
+        XPLMDataTypeID types    = info.type;
+        const char    *raw_name = (info.name != nullptr) ? info.name : "";
+        bool           writable = XPLMCanWriteDataRef(h) != 0;
 
         // Defensively copy the name — SDK does not document ownership of the
         // pointer in XPLMDataRefInfo_t.name. One small allocation per ref at
         // enum time is fine.
         std::strncpy(name_buf, raw_name, sizeof(name_buf) - 1);
         name_buf[sizeof(name_buf) - 1] = '\0';
-        std::string name = name_buf;
+        std::string name               = name_buf;
         if (name.empty())
             continue;
 
         // Drop engine-internal stats / renderer counters.
-        if (name.size() >= PRIVATE_PREFIX_LEN &&
-            std::strncmp(name.c_str(), PRIVATE_PREFIX, PRIVATE_PREFIX_LEN) == 0)
+        if (name.size() >= PRIVATE_PREFIX_LEN && std::strncmp(name.c_str(), PRIVATE_PREFIX, PRIVATE_PREFIX_LEN) == 0)
         {
             ++skipped_private;
             continue;
@@ -134,8 +133,7 @@ void rebuild()
             bool user_drop = false;
             for (const auto &px : s_user_exclusions)
             {
-                if (!px.empty() && name.size() >= px.size() &&
-                    std::strncmp(name.c_str(), px.c_str(), px.size()) == 0)
+                if (!px.empty() && name.size() >= px.size() && std::strncmp(name.c_str(), px.c_str(), px.size()) == 0)
                 {
                     user_drop = true;
                     break;
@@ -149,10 +147,10 @@ void rebuild()
         }
 
         // Skip byte/string refs in v1 (logged once at the end).
-        bool has_data    = (types & xplmType_Data) != 0;
-        bool has_scalar  = (types & (xplmType_Int | xplmType_Float | xplmType_Double)) != 0;
-        bool has_iarray  = (types & xplmType_IntArray) != 0;
-        bool has_farray  = (types & xplmType_FloatArray) != 0;
+        bool has_data           = (types & xplmType_Data) != 0;
+        bool has_scalar         = (types & (xplmType_Int | xplmType_Float | xplmType_Double)) != 0;
+        bool has_iarray         = (types & xplmType_IntArray) != 0;
+        bool has_farray         = (types & xplmType_FloatArray) != 0;
         bool has_any_we_support = has_scalar || has_iarray || has_farray;
 
         if (!has_any_we_support)
@@ -217,8 +215,8 @@ void rebuild()
 
     char banner[256];
     snprintf(banner, sizeof(banner),
-             "[xp_sherlock] Enumerated %d datarefs → %d logical (arrays expanded: %d, multi-typed: %d)\n",
-             total, total_logical, expanded_arrays, multi_typed);
+             "[xp_sherlock] Enumerated %d datarefs → %d logical (arrays expanded: %d, multi-typed: %d)\n", total,
+             total_logical, expanded_arrays, multi_typed);
     XPLMDebugString(banner);
 
     if (skipped_data || skipped_unknown || skipped_private || skipped_user_excluded)
@@ -242,10 +240,7 @@ bool is_built() { return s_built; }
 
 const std::vector<LogicalRef> &all() { return s_index; }
 
-void set_user_exclusions(std::vector<std::string> prefixes)
-{
-    s_user_exclusions = std::move(prefixes);
-}
+void set_user_exclusions(std::vector<std::string> prefixes) { s_user_exclusions = std::move(prefixes); }
 
 const std::vector<std::string> &user_exclusions() { return s_user_exclusions; }
 
@@ -266,9 +261,9 @@ bool read(const LogicalRef &lr, SampleValue &out)
         return true;
     case RefType::IntArrayElem:
     {
-        int   v   = 0;
-        int   got = XPLMGetDatavi(lr.handle, &v, lr.array_index, 1);
-        out.i     = (got == 1) ? v : 0;
+        int v   = 0;
+        int got = XPLMGetDatavi(lr.handle, &v, lr.array_index, 1);
+        out.i   = (got == 1) ? v : 0;
         return got == 1;
     }
     case RefType::FloatArrayElem:
@@ -313,16 +308,16 @@ std::string code_snippet(const LogicalRef &lr)
     switch (lr.type)
     {
     case RefType::Int:
-        snprintf(buf, sizeof(buf),
-                 "XPLMDataRef dr = XPLMFindDataRef(\"%s\");\nint v = XPLMGetDatai(dr);", lr.name.c_str());
+        snprintf(buf, sizeof(buf), "XPLMDataRef dr = XPLMFindDataRef(\"%s\");\nint v = XPLMGetDatai(dr);",
+                 lr.name.c_str());
         break;
     case RefType::Float:
-        snprintf(buf, sizeof(buf),
-                 "XPLMDataRef dr = XPLMFindDataRef(\"%s\");\nfloat v = XPLMGetDataf(dr);", lr.name.c_str());
+        snprintf(buf, sizeof(buf), "XPLMDataRef dr = XPLMFindDataRef(\"%s\");\nfloat v = XPLMGetDataf(dr);",
+                 lr.name.c_str());
         break;
     case RefType::Double:
-        snprintf(buf, sizeof(buf),
-                 "XPLMDataRef dr = XPLMFindDataRef(\"%s\");\ndouble v = XPLMGetDatad(dr);", lr.name.c_str());
+        snprintf(buf, sizeof(buf), "XPLMDataRef dr = XPLMFindDataRef(\"%s\");\ndouble v = XPLMGetDatad(dr);",
+                 lr.name.c_str());
         break;
     case RefType::IntArrayElem:
         snprintf(buf, sizeof(buf),

@@ -71,7 +71,8 @@ bool is_discrete_like(const EventStream &s)
     auto near_int_d = [](double v) { return std::fabs(v - std::round(v)) < 0.01; };
     auto near_int_f = [](float v) { return std::fabs(v - std::round(v)) < 0.01f; };
 
-    auto check = [&](SampleValue v) -> bool {
+    auto check = [&](SampleValue v) -> bool
+    {
         switch (s.type)
         {
         case RefType::Float:
@@ -114,9 +115,9 @@ int staircase_steps(const EventStream &s)
 {
     if (s.events.empty())
         return 0;
-    int best     = 1;
-    int run      = 1;
-    int8_t prev  = s.events[0].direction;
+    int    best = 1;
+    int    run  = 1;
+    int8_t prev = s.events[0].direction;
     for (std::size_t i = 1; i < s.events.size(); ++i)
     {
         int8_t cur = s.events[i].direction;
@@ -216,28 +217,35 @@ std::vector<Candidate> rank(const std::vector<EventStream> &streams, const std::
         const RefMeta &m = (i < metas.size()) ? metas[i] : RefMeta{};
 
         Candidate c;
-        c.logical_ref_idx     = s.logical_ref_idx;
-        c.type                = s.type;
-        c.baseline_value      = s.baseline_value;
-        c.current_value       = s.current_value;
-        c.min_seen            = s.baseline_value;
-        c.max_seen            = s.baseline_value;
-        auto track = [&](SampleValue v) {
+        c.logical_ref_idx = s.logical_ref_idx;
+        c.type            = s.type;
+        c.baseline_value  = s.baseline_value;
+        c.current_value   = s.current_value;
+        c.min_seen        = s.baseline_value;
+        c.max_seen        = s.baseline_value;
+        auto track        = [&](SampleValue v)
+        {
             switch (s.type)
             {
             case RefType::Int:
             case RefType::IntArrayElem:
-                if (v.i < c.min_seen.i) c.min_seen.i = v.i;
-                if (v.i > c.max_seen.i) c.max_seen.i = v.i;
+                if (v.i < c.min_seen.i)
+                    c.min_seen.i = v.i;
+                if (v.i > c.max_seen.i)
+                    c.max_seen.i = v.i;
                 break;
             case RefType::Float:
             case RefType::FloatArrayElem:
-                if (v.f < c.min_seen.f) c.min_seen.f = v.f;
-                if (v.f > c.max_seen.f) c.max_seen.f = v.f;
+                if (v.f < c.min_seen.f)
+                    c.min_seen.f = v.f;
+                if (v.f > c.max_seen.f)
+                    c.max_seen.f = v.f;
                 break;
             case RefType::Double:
-                if (v.d < c.min_seen.d) c.min_seen.d = v.d;
-                if (v.d > c.max_seen.d) c.max_seen.d = v.d;
+                if (v.d < c.min_seen.d)
+                    c.min_seen.d = v.d;
+                if (v.d > c.max_seen.d)
+                    c.max_seen.d = v.d;
                 break;
             }
         };
@@ -247,8 +255,8 @@ std::vector<Candidate> rank(const std::vector<EventStream> &streams, const std::
             track(e.to);
         }
         track(s.current_value);
-        c.is_writable         = m.is_writable;
-        c.total_events        = static_cast<int>(s.events.size());
+        c.is_writable  = m.is_writable;
+        c.total_events = static_cast<int>(s.events.size());
 
         for (const auto &e : s.events)
         {
@@ -279,28 +287,30 @@ std::vector<Candidate> rank(const std::vector<EventStream> &streams, const std::
             score += 100.f; // strongest "this is the cause, not a downstream effect" signal
 
         if (hints.expected_clicks > 0 && c.staircase_steps == hints.expected_clicks)
-            score += 60.f;  // rotary perfect match — near-certain
+            score += 60.f; // rotary perfect match — near-certain
         else if (c.monotonic_staircase)
-            score += 30.f;  // rotary-like (≥3 monotonic steps)
+            score += 30.f; // rotary-like (≥3 monotonic steps)
 
         if (c.has_latency)
         {
             if (c.min_latency_ms < hints.user_click_window_ms)
-                score += 25.f;     // first reaction within user-click window
+                score += 25.f; // first reaction within user-click window
             if (c.median_latency_ms < 250.f)
-                score += 10.f;     // overall fast — cause-like
+                score += 10.f; // overall fast — cause-like
         }
 
         if (hints.expect_bidirectional)
         {
             int missing = 0;
-            if (c.pos_count == 0) ++missing;
-            if (c.neg_count == 0) ++missing;
+            if (c.pos_count == 0)
+                ++missing;
+            if (c.neg_count == 0)
+                ++missing;
             score -= 15.f * static_cast<float>(missing);
         }
 
         if (c.asymmetric_decay && !c.bidirectional)
-            score -= 10.f;       // looks like a downstream voltage drain — demote
+            score -= 10.f; // looks like a downstream voltage drain — demote
 
         // Switches set integer-ish values; sensors set fractional floats.
         // Demote non-discrete float refs — likely a downstream effect that
@@ -314,7 +324,7 @@ std::vector<Candidate> rank(const std::vector<EventStream> &streams, const std::
             score -= 5.f * static_cast<float>(chatty); // chatty refs are usually noise
 
         if (m.is_writable)
-            score += 5.f;        // mild bonus — repurposed storage cells are typically writable
+            score += 5.f; // mild bonus — repurposed storage cells are typically writable
 
         // Tie-breakers (fractional, never overrule strong signal):
         //  - shorter path wins (top-level sim/cockpit2 > deep nested)
@@ -355,9 +365,8 @@ float latency_for_command_ms(float fire_t_sec, const AnchorList &anchors)
 } // namespace
 
 std::vector<Candidate> rank_commands(const std::vector<CommandEventStream> &streams,
-                                     const std::vector<CommandRefMeta>     &metas,
-                                     const AnchorList                      &anchors,
-                                     const Hints                           &hints)
+                                     const std::vector<CommandRefMeta> &metas, const AnchorList &anchors,
+                                     const Hints &hints)
 {
     std::vector<Candidate> out;
     out.reserve(streams.size() / 64); // most commands never fire — start small
@@ -370,8 +379,8 @@ std::vector<Candidate> rank_commands(const std::vector<CommandEventStream> &stre
         // user-action instant, Continue is "still held" (fires every frame
         // for held keys), End is the release. Scoring against Continue would
         // wildly inflate fire counts for any held-down cockpit binding.
-        int   begin_fires = 0;
-        float first_begin = -1.f;
+        int                begin_fires = 0;
+        float              first_begin = -1.f;
         std::vector<float> begin_times;
         begin_times.reserve(s.events.size());
         for (const auto &e : s.events)
@@ -398,7 +407,7 @@ std::vector<Candidate> rank_commands(const std::vector<CommandEventStream> &stre
         c.total_events = static_cast<int>(s.events.size());
 
         // Latency to nearest anchor across all Begin fires.
-        float min_lat = -1.f;
+        float              min_lat = -1.f;
         std::vector<float> lats;
         lats.reserve(begin_times.size());
         for (float t : begin_times)
