@@ -1,0 +1,3 @@
+lin_x64/xp_sherlock_dataref.xpl|1136504
+mac_x64/xp_sherlock_dataref.xpl|1987960
+win_x64/xp_sherlock_dataref.xpl|881152
