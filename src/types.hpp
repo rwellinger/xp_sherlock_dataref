@@ -75,8 +75,16 @@ struct ChangeEvent
     SampleValue from;
     SampleValue to;
     uint32_t    frame;
-    float       t_sec;
-    int8_t      direction; // +1 / -1 / 0
+    // Time the change was CONFIRMED, i.e. after the value held steady for
+    // HOLD_FRAMES. This is the timestamp used for anchor correlation, where a
+    // few frames of lag is irrelevant because it applies to every ref equally.
+    float t_sec;
+    // Time the value FIRST deviated, before the hold-confirmation delay. Needed
+    // for command→DataRef causality: the gap between a command firing and the
+    // ref reacting is only a few frames, so the ~HOLD_FRAMES confirmation lag
+    // would swamp the very signal being measured.
+    float  onset_t_sec;
+    int8_t direction; // +1 / -1 / 0
 };
 
 struct EventStream
@@ -114,6 +122,15 @@ struct CommandEventStream
     uint32_t                      command_idx = 0;
     std::vector<CommandFireEvent> events;
     uint8_t                       last_phase = 0xFF;
+    // Begin-fires observed during Baseline / Learn Ambient. A command that
+    // fires in a stationary cockpit is ambient noise by definition — some
+    // aircraft (e.g. the AW139 with sim/autopilot/disconnect/...) chatter
+    // continuously and would otherwise bury the real candidate.
+    int baseline_begin_fires = 0;
+    // Muted == hidden from the main candidate list. Deliberately NOT
+    // "dropped": muted commands keep recording so nothing can be lost, and
+    // rank_commands() can promote one back if it behaves purposefully.
+    bool muted = false;
 };
 
 // Parallel-array companion to CommandEventStream, mirroring how RefMeta
@@ -153,6 +170,25 @@ struct Candidate
     // Command-only fields. Populated by rank_commands() for kind==Command rows.
     int     fire_count = 0;
     uint8_t last_phase = 0;
+    // Baseline-noise muting. `is_muted` is the ranking-time verdict; the UI
+    // additionally honours live user overrides. `auto_unmuted` marks a row the
+    // heuristic pulled back out of the muted set, so the UI can explain why.
+    bool is_muted       = false;
+    bool auto_unmuted   = false;
+    int  baseline_fires = 0;
+    // Anchor coverage — how cleanly this candidate answered the user's "I Acted
+    // Now" stamps. Set for both kinds. anchors_total == 0 means the user placed
+    // no anchors, in which case coverage carries no information either way.
+    int anchors_hit   = 0;
+    int anchors_total = 0;
+    int orphan_events = 0;
+    // Causal ordering. `onset_lag_ms` is the median time from an actuation to
+    // this ref's first movement; the ref that moves FIRST is the cause and
+    // everything behind it is the cascade it drives. Only meaningful with
+    // anchors, hence the explicit validity flag.
+    float onset_lag_ms   = 0.f;
+    bool  has_onset_lag  = false;
+    bool  is_first_mover = false; // reacted earliest of all candidates
 };
 
 } // namespace xp_sherlock

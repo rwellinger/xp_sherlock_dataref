@@ -99,6 +99,11 @@ struct ChangeDetector
     SampleValue candidate_value; // currently held but not yet confirmed
     Phase       phase     = Phase::Stable;
     int         hold_left = 0;
+    // Sim-time at which this ref first left its stable value. Captured on the
+    // Stable→Candidate edge and carried through any bounces, so the emitted
+    // event reports when the ref actually started moving rather than when the
+    // hold counter happened to expire.
+    float onset_t_sec = 0.f;
 
     void init(RefType t, SampleValue v)
     {
@@ -106,6 +111,7 @@ struct ChangeDetector
         stable_value = v;
         phase        = Phase::Stable;
         hold_left    = 0;
+        onset_t_sec  = 0.f;
     }
 
     // Feed one sample. If a change is confirmed, fills `out` and returns true.
@@ -118,6 +124,7 @@ struct ChangeDetector
                 phase           = Phase::Candidate;
                 candidate_value = sample;
                 hold_left       = hold_frames - 1;
+                onset_t_sec     = t_sec;
             }
             return false;
         }
@@ -137,12 +144,13 @@ struct ChangeDetector
                 if (within_epsilon(type, stable_value, candidate_value))
                     return false;
 
-                out.from      = stable_value;
-                out.to        = candidate_value;
-                out.frame     = frame;
-                out.t_sec     = t_sec;
-                out.direction = direction_of(type, stable_value, candidate_value);
-                stable_value  = candidate_value;
+                out.from        = stable_value;
+                out.to          = candidate_value;
+                out.frame       = frame;
+                out.t_sec       = t_sec;
+                out.onset_t_sec = onset_t_sec;
+                out.direction   = direction_of(type, stable_value, candidate_value);
+                stable_value    = candidate_value;
                 return true;
             }
             return false;

@@ -54,6 +54,13 @@ bool          s_open      = false;
 
 double s_last_frame_time = 0.0;
 
+// Scroll-anchor coalescing. One flick of the wheel arrives as a burst of
+// notches; treating each as a separate actuation would fabricate anchors the
+// user never placed. 0.25 s is comfortably longer than a burst and far shorter
+// than the gap between two deliberate knob turns.
+constexpr float SCROLL_ANCHOR_COALESCE_S = 0.25f;
+float           s_last_scroll_anchor_t   = 0.f;
+
 double get_xp_time()
 {
     static XPLMDataRef dr = nullptr;
@@ -63,9 +70,14 @@ double get_xp_time()
 }
 
 // ── UI state ─────────────────────────────────────────────────────────────────
+// Switch kind. Bool alternates (ON-OFF-ON), rotary walks one way. This is the
+// part anchors cannot tell us — the NUMBER of actuations is derived from the
+// anchor count instead of being typed in.
 bool s_expect_bidirectional = true;
-int  s_expected_clicks      = 3;
 int  s_selected_candidate   = -1;
+// Baseline window length. Raised from the old fixed 2.5 s and made adjustable:
+// aircraft that chatter on a slow cycle need a longer look to be profiled.
+float s_baseline_seconds = 5.0f;
 
 // Test panel state — separate value buffer per scalar/array kind
 int    s_write_int    = 1;
@@ -113,9 +125,16 @@ bool s_filters_dirty                             = true; // forces rebuild() bef
 
 // ── Result filter (live substring filter on candidate table) ─────────────────
 char s_result_filter[128] = "";
-bool s_show_datarefs      = true;
-bool s_show_commands      = true;
-bool s_writable_only      = false;
+// Separate query for the "why is my ref missing" lookup — kept apart from the
+// result filter so searching for an absent ref does not disturb the table view.
+char s_excluded_filter[128] = "";
+bool s_show_datarefs        = true;
+bool s_show_commands        = true;
+bool s_writable_only        = false;
+// Float rows belonging to a command→DataRef pair to the top. On by default:
+// when a pair exists it is the answer, and hunting for it down at rank 17
+// defeats the point of detecting it.
+bool s_linked_first = true;
 
 // ── Capture-window callbacks ─────────────────────────────────────────────────
 //
@@ -154,7 +173,18 @@ int MouseCallback(XPLMWindowID wnd, int x, int y, XPLMMouseStatus status, void *
     io.AddMousePosEvent(mx, my); // position is harmless to update even outside our window
 
     if (!imgui_owns_button(0))
+    {
+        // The click is going through to the cockpit. During Record that IS the
+        // user's actuation, so it anchors itself — no trip back to the window,
+        // which is what made manual anchors unusable in practice. Down only:
+        // anchoring the matching Up would double-count every press.
+        //
+        // No guessing involved: ImGui already told us it does not want this
+        // click, so it cannot be a click on our own UI.
+        if (status == xplm_MouseDown && recorder::phase() == Phase::Record)
+            recorder::mark_user_action();
         return 0; // cockpit gets it — and we do NOT poison ImGui with a half-pair Down/Up
+    }
 
     if (status == xplm_MouseDown)
         io.AddMouseButtonEvent(0, true);
@@ -171,7 +201,22 @@ int ScrollCallback(XPLMWindowID wnd, int x, int y, int, int clicks, void *)
     ImGuiIO &io = ImGui::GetIO();
     io.AddMousePosEvent(static_cast<float>(x - left), static_cast<float>(top - y));
     if (!io.WantCaptureMouse)
+    {
+        // Rotary knobs are worked with the wheel, so a cockpit-bound scroll is
+        // an actuation too. Coalesced: one flick of the wheel emits a burst of
+        // notches, and anchoring each would invent a dozen actuations the user
+        // never made — which would wreck the anchor-coverage metric.
+        if (recorder::phase() == Phase::Record)
+        {
+            const float now = static_cast<float>(get_xp_time());
+            if (now - s_last_scroll_anchor_t >= SCROLL_ANCHOR_COALESCE_S)
+            {
+                s_last_scroll_anchor_t = now;
+                recorder::mark_user_action();
+            }
+        }
         return 0; // forward scroll wheel to cockpit (knobs, throttle wheels, etc.)
+    }
     io.AddMouseWheelEvent(0.f, static_cast<float>(clicks));
     return 1;
 }
@@ -328,6 +373,8 @@ const char *phase_label(Phase p)
         return "Inspect";
     case Phase::NoiseCapture:
         return "Learning Ambient";
+    case Phase::Probe:
+        return "Probing";
     }
     return "?";
 }
@@ -339,19 +386,21 @@ std::string hint_text(Phase p)
     case Phase::Idle:
         return "Sit still, then Learn Baseline to model the environment.";
     case Phase::Baseline:
-        return "Hold still - learning baseline...";
+        return "Hold still - learning baseline. On a chatty aircraft, raise the baseline length under Advanced.";
     case Phase::Record:
         if (recorder::auto_stop_enabled())
-            return "Flip the switch THREE times (e.g. ON-OFF-ON). Click 'I Acted Now' before each flip. "
-                   "Auto-stops after >=5 s once a ref hits the pattern.";
+            return "Click 'I Acted Now', then work the switch. Repeat several times - more cycles means a "
+                   "sharper result. Stops on its own a few seconds after your last action.";
         else
-            return "Flip the switch several times. Click 'I Acted Now' before each flip. "
-                   "Click 'Stop' when done (auto-stop is disabled).";
+            return "Click 'I Acted Now', then work the switch. Repeat several times - more cycles means a "
+                   "sharper result. Click 'Stop' when done (auto-stop is disabled).";
     case Phase::Inspect:
         return "Top-ranked DataRef is most likely the cause. Lower ranks may be downstream effects.";
     case Phase::NoiseCapture:
         return "Learning the ambient profile - drive everything you want filtered out (e.g. power the bus). "
                "Every ref that moves is added to the ignore-set. Click 'Stop' when done, then Record your target.";
+    case Phase::Probe:
+        return "Measuring the cascade - hands off the cockpit until this finishes.";
     }
     return "";
 }
@@ -485,7 +534,35 @@ bool path_matches(const std::string &path, const char *needle)
     return false;
 }
 
+// True if this row is currently hidden as baseline command noise. Queried live
+// from command_recorder rather than read off Candidate::is_muted, so that an
+// Unmute click takes effect on the very next frame without re-ranking.
+bool row_is_muted(const Candidate &c) { return c.kind == Kind::Command && command_recorder::is_muted(c.command_idx); }
+
+// Is this candidate one half of a detected command→DataRef pair? Those rows are
+// the actionable conclusion, so they are worth floating to the top of the table
+// regardless of where their raw score happened to land.
+// Only PRIMARY links count here. Every ref in the cascade behind a command is
+// technically "linked" — firing the battery master lights the whole warning
+// panel in the same frame — but floating a dozen unrelated lamps to the top of
+// the table is worse than not sorting at all.
+bool row_is_linked(const Candidate &c)
+{
+    for (const auto &l : recorder::command_ref_links())
+    {
+        if (!l.primary)
+            continue;
+        if (c.kind == Kind::Command && c.command_idx == l.command_idx)
+            return true;
+        if (c.kind == Kind::DataRef && c.logical_ref_idx == l.logical_ref_idx)
+            return true;
+    }
+    return false;
+}
+
 // ── UI body ──────────────────────────────────────────────────────────────────
+void draw_excluded_lookup(); // defined below, rendered inside Advanced
+
 void draw_snapshot_filters()
 {
     if (!ImGui::CollapsingHeader("Snapshot filters (exclude noisy namespaces)"))
@@ -537,10 +614,34 @@ void draw_status_bar()
         // some ref (for bool mode) or expected_clicks events (rotary).
         ImGui::Text("   %.1f s   |   best ref: %d events   |   anchors: %d", static_cast<double>(st.record_elapsed_s),
                     st.best_events_so_far, st.anchors_set);
+        // Countdown, so a long mouse trip to the switch never ends in a
+        // surprise stop — if it is running low, one more anchor resets it.
+        if (st.auto_stop_in_s >= 0.f)
+        {
+            ImGui::SameLine();
+            const bool soon = st.auto_stop_in_s < 3.f;
+            ImGui::TextColored(soon ? ImVec4(1.0f, 0.55f, 0.35f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                               "   |   auto-stop in %.0f s", static_cast<double>(st.auto_stop_in_s));
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Resets every time you click \"I Acted Now\".\nKeep going for as many cycles as "
+                                  "you like - the window adapts to your pace.");
+        }
     }
     else if (st.phase == Phase::Inspect)
     {
         ImGui::Text("   %d candidates", st.candidate_count);
+        // Without anchors the strongest filter never ran, and the ranking is
+        // weaker than it looks. Say so rather than presenting the list as if it
+        // had the full evidence behind it.
+        if (st.anchors_set == 0)
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f),
+                               "   No actions were registered - anchor coverage could not be scored.");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("During Record, clicking the cockpit switch registers the action automatically.\n"
+                                  "If nothing was registered, the switch may have been operated by other means,\n"
+                                  "or the recording ended before you reached it.");
+        }
     }
     else if (st.phase == Phase::NoiseCapture)
     {
@@ -554,6 +655,9 @@ void draw_status_bar()
         ImGui::TextDisabled("(%d logical refs, %d ignored, %d watched)", st.total_logical, st.ignored_count,
                             st.watched_count);
     }
+    if (st.muted_command_count > 0)
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%d commands muted as baseline noise.",
+                           st.muted_command_count);
 }
 
 void draw_button_row()
@@ -591,7 +695,7 @@ void draw_button_row()
             s_filters_dirty = false;
         }
         s_selected_candidate = -1;
-        recorder::start_baseline(2.5f);
+        recorder::start_baseline(s_baseline_seconds);
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -600,7 +704,7 @@ void draw_button_row()
     if (ImGui::Button("Record"))
     {
         s_selected_candidate = -1;
-        recorder::start_record(s_expect_bidirectional, s_expected_clicks);
+        recorder::start_record(s_expect_bidirectional);
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -653,35 +757,53 @@ void draw_button_row()
     {
         ImGui::Indent();
 
-        // Record mode: bool toggle vs. rotary with an explicit click count.
-        ImGui::RadioButton("Bool ON-OFF-ON", &s_expected_clicks, 3);
-        ImGui::SameLine();
-        int rotary_now = (s_expected_clicks == 3) ? 4 : s_expected_clicks;
-        if (ImGui::RadioButton("Rotary clicks:", s_expected_clicks != 3))
-            s_expected_clicks = rotary_now;
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(80.f);
-        int clicks_edit = (s_expected_clicks == 3) ? 4 : s_expected_clicks;
-        if (ImGui::InputInt("##clicks", &clicks_edit, 1, 1))
-        {
-            if (clicks_edit < 2)
-                clicks_edit = 2;
-            if (clicks_edit > 16)
-                clicks_edit = 16;
-            if (s_expected_clicks != 3)
-                s_expected_clicks = clicks_edit;
-        }
-        s_expect_bidirectional = (s_expected_clicks == 3);
+        // Baseline length. The single most effective knob on a noisy aircraft:
+        // a command that only re-fires every few seconds can sit out a short
+        // window entirely and escape the noise filter.
+        ImGui::SetNextItemWidth(220.f);
+        ImGui::SliderFloat("Baseline length", &s_baseline_seconds, 2.f, 20.f, "%.1f s");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("How long Learn Baseline watches while you hold still.\n"
+                              "Longer catches more ambient noise, including commands that only\n"
+                              "fire every few seconds. On a chatty aircraft try 10-15 s.");
 
-        // Auto-stop toggle. On large displays the mouse travel between cockpit
-        // switch and the "I Acted Now" button can take seconds — auto-stop
-        // (default 5 s + 3 events) may fire before you've finished the sequence.
-        // Turning it off makes Record run until you click Stop.
+        // Switch kind. Only the KIND is asked for — how many times you actuate
+        // is read from the anchors you place, so there is no count to get wrong.
+        ImGui::TextDisabled("Switch kind");
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Bool (on-off-on)", s_expect_bidirectional))
+            s_expect_bidirectional = true;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Rotary (steps one way)", !s_expect_bidirectional))
+            s_expect_bidirectional = false;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Bool alternates back and forth; rotary walks in one direction.\n"
+                              "The number of actuations comes from your \"I Acted Now\" anchors -\n"
+                              "just click one before each move and the count takes care of itself.");
+
+        // Auto-stop toggle. With anchors set, Record now ends after a few
+        // seconds of quiet following your last anchor, so it can no longer cut
+        // a long sequence short. Turning it off makes Record run until Stop.
         bool as = recorder::auto_stop_enabled();
-        if (ImGui::Checkbox("Auto-stop when pattern detected", &as))
+        if (ImGui::Checkbox("Auto-stop when you stop acting", &as))
             recorder::set_auto_stop_enabled(as);
         ImGui::SameLine();
         ImGui::TextDisabled("(off = always stop manually)");
+
+        // Command noise muting. Some aircraft fire commands constantly without
+        // any user input (the AW139 chatters on sim/autopilot/disconnect/...),
+        // which buries the real candidate in the result table.
+        bool mute = command_recorder::mute_enabled();
+        if (ImGui::Checkbox("Mute commands that fire during baseline", &mute))
+            command_recorder::set_mute_enabled(mute);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Some aircraft fire commands nonstop with no user input (e.g. the AW139 and\n"
+                              "sim/autopilot/disconnect/...). Any command that fires while you hold still during\n"
+                              "Learn Baseline or Learn Ambient is muted.\n\n"
+                              "Muted does not mean discarded: those commands are still recorded in full and listed\n"
+                              "under \"Muted as baseline noise\" below the results, where you can unmute any of them.\n"
+                              "A muted command that fires close to your \"I Acted Now\" anchors is brought back\n"
+                              "automatically and marked with an asterisk.");
 
         ImGui::Spacing();
         ImGui::BeginDisabled(!can_reset);
@@ -705,7 +827,187 @@ void draw_button_row()
         ImGui::Spacing();
         draw_snapshot_filters();
 
+        ImGui::Spacing();
+        draw_excluded_lookup();
+
         ImGui::Unindent();
+    }
+}
+
+// "Where did my DataRef go?" — a ref that moved during the baseline is dropped
+// from the entire recording, so it appears in no table and no ranking. Without
+// this lookup its absence is unexplainable, and longer baselines (now the
+// recommendation on noisy aircraft) make it more likely.
+void draw_excluded_lookup()
+{
+    if (!ImGui::CollapsingHeader("Find a missing DataRef"))
+        return;
+
+    ImGui::TextWrapped("Can't find a ref you expected? It may have been excluded as baseline noise, or filtered out "
+                       "before enumeration. Search for it here.");
+
+    ImGui::SetNextItemWidth(320.f);
+    ImGui::InputTextWithHint("##excl", "Part of the path, e.g. battery", s_excluded_filter, sizeof(s_excluded_filter));
+    if (s_excluded_filter[0] == '\0')
+        return;
+
+    const auto &refs = dataref_index::all();
+    int         hits = 0, shown = 0;
+    // Cap the output: a two-character query can match thousands of refs, and
+    // rendering all of them would stall the frame.
+    constexpr int kMaxShown = 40;
+
+    for (std::size_t i = 0; i < refs.size(); ++i)
+    {
+        if (!path_matches(refs[i].display_path, s_excluded_filter))
+            continue;
+        ++hits;
+        if (shown >= kMaxShown)
+            continue;
+        ++shown;
+
+        const bool ignored = recorder::is_ignored_as_noise(i);
+        if (ignored)
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.35f, 1.0f), "excluded as noise  %s", refs[i].display_path.c_str());
+        else
+            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "being watched      %s", refs[i].display_path.c_str());
+    }
+
+    if (hits == 0)
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f),
+                           "Not in the index at all - excluded by a snapshot filter, or the aircraft registers it "
+                           "late. Try Re-enumerate.");
+    }
+    else if (hits > shown)
+    {
+        ImGui::TextDisabled("...and %d more. Narrow the search.", hits - shown);
+    }
+}
+
+void draw_muted_commands_section(); // defined below; rendered under the table
+
+// Command→DataRef pairs. This answers the question the ranked table cannot:
+// when both a command and a DataRef correlate with the same switch, which one
+// do you bind and which one do you read? The command fires first and the ref
+// follows — so the command is the actuator and the ref is the status output.
+void draw_command_ref_links()
+{
+    const auto &links = recorder::command_ref_links();
+    const auto &cmds  = command_index::all();
+
+    // An empty section used to just vanish, which is indistinguishable from
+    // "the feature did not run". Name the reason instead — the causes are
+    // specific and actionable.
+    if (links.empty())
+    {
+        if (recorder::status().phase != Phase::Inspect)
+            return;
+
+        int cmd_candidates = 0;
+        for (const auto &c : recorder::candidates())
+            if (c.kind == Kind::Command)
+                ++cmd_candidates;
+
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f), "No command/DataRef pair found.");
+        if (cmd_candidates == 0)
+        {
+            ImGui::TextWrapped("No command fired at all during the recording, so there was nothing to pair. Either "
+                               "the switch is not bound to a command, or its command is not being watched.");
+            ImGui::TextDisabled("Watching %zu commands. If this aircraft registers its own commands at runtime "
+                                "(xlua/SASL/plugin), check the aircraft-asset scan line in Log.txt - X-Plane offers "
+                                "no way to enumerate commands, so their names must be found in the aircraft files.",
+                                cmds.size());
+        }
+        else
+        {
+            ImGui::TextWrapped("%d command(s) fired, but no DataRef followed them consistently enough to call it a "
+                               "pair. The switch may drive its state entirely inside aircraft logic.",
+                               cmd_candidates);
+        }
+        return;
+    }
+
+    int n_primary = 0;
+    for (const auto &l : links)
+        if (l.primary)
+            ++n_primary;
+    const int n_cascade = static_cast<int>(links.size()) - n_primary;
+
+    // Renders one table over the subset selected by `want_primary`.
+    auto link_table = [&](const char *table_id, bool want_primary)
+    {
+        ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable;
+        if (!ImGui::BeginTable(table_id, 4, flags))
+            return;
+
+        ImGui::TableSetupColumn(want_primary ? "Command (send this)" : "Command", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn(want_primary ? "DataRef (read this)" : "DataRef that also reacted",
+                                ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Fires", ImGuiTableColumnFlags_WidthFixed, 60.f);
+        ImGui::TableSetupColumn("Delay", ImGuiTableColumnFlags_WidthFixed, 70.f);
+        ImGui::TableHeadersRow();
+
+        for (const auto &l : links)
+        {
+            if (l.primary != want_primary)
+                continue;
+            const LogicalRef *lr = recorder::logical_ref_at(l.logical_ref_idx);
+            if (!lr || l.command_idx >= cmds.size())
+                continue;
+
+            ImGui::TableNextRow();
+
+            ImGui::TableNextColumn();
+            ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.0f), "%s", cmds[l.command_idx].name.c_str());
+
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(lr->display_path.c_str());
+            if (want_primary && ImGui::IsItemHovered())
+                ImGui::SetTooltip("Chosen over %d other ref(s) that reacted to the same command:\n"
+                                  "%d shared name token(s) with the command, candidate score %.0f.",
+                                  n_cascade, l.name_affinity, static_cast<double>(l.ref_score));
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%d/%d", l.fires_matched, l.fires_total);
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%.0f ms", static_cast<double>(l.median_delay_ms));
+        }
+        ImGui::EndTable();
+    };
+
+    ImGui::Spacing();
+    char header[96];
+    snprintf(header, sizeof(header), "Command drives DataRef (%d)###cmdlinks", n_primary);
+    // Open by default: this is usually the answer the user came for.
+    ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+    if (!ImGui::CollapsingHeader(header))
+        return;
+
+    ImGui::TextWrapped("The command fired first and the DataRef followed within a few frames, on every single fire. "
+                       "For a Streamdeck or hardware binding that means: send the COMMAND, read the DATAREF for "
+                       "state. Writing the DataRef directly may only move the switch without driving the systems "
+                       "behind it - use the Compare button below to check.");
+
+    if (n_primary > 0)
+        link_table("cmdlinks", true);
+
+    // Everything else the command moved. Shown separately and collapsed: these
+    // are consequences of the state ref (warning lamps, bus voltages), not
+    // candidates for the binding, and listing them alongside the real pair is
+    // what buried the answer in the first place.
+    if (n_cascade > 0)
+    {
+        char casc[112];
+        snprintf(casc, sizeof(casc), "Cascade: %d more ref(s) reacted to these commands###cmdcascade", n_cascade);
+        if (ImGui::CollapsingHeader(casc))
+        {
+            ImGui::TextWrapped("Downstream effects - lamps, voltages, annunciators that the aircraft updates once "
+                               "the state ref changes. Useful for confirming the cascade is real, not for binding.");
+            link_table("cmdcascade_tbl", false);
+        }
     }
 }
 
@@ -752,6 +1054,16 @@ void draw_candidates_table()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Hide read-only DataRefs. Commands are always shown.");
 
+    if (!recorder::command_ref_links().empty())
+    {
+        ImGui::SameLine();
+        ImGui::Checkbox("Pairs first", &s_linked_first);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Float rows belonging to a detected command/DataRef pair to the top of the list,\n"
+                              "highlighted in green. The Rank column keeps showing each row's true position,\n"
+                              "so nothing is renumbered. Turn off for pure score order.");
+    }
+
     // Live substring filter on the path column. The displayed Rank stays the
     // true index in cands[], so hidden rows never push visible rows into a
     // different number — this is what keeps Copy path / Copy code snippet
@@ -775,6 +1087,10 @@ void draw_candidates_table()
 
     auto row_visible = [&](const Candidate &c, const std::string &path) -> bool
     {
+        // Muted commands are not dropped — they move to the collapsible
+        // "Muted (baseline noise)" section below, with their full fire history.
+        if (row_is_muted(c))
+            return false;
         if (c.kind == Kind::DataRef && !s_show_datarefs)
             return false;
         if (c.kind == Kind::Command && !s_show_commands)
@@ -800,10 +1116,33 @@ void draw_candidates_table()
         return lr && dataref_index::read(*lr, out);
     };
 
+    // Display order. The Rank column keeps showing the TRUE index in cands[],
+    // so reordering never renumbers anything — a row pulled to the top still
+    // reads "17" and Copy path / the test panel stay unambiguous.
+    const bool       group_linked = s_linked_first && !recorder::command_ref_links().empty();
+    std::vector<int> order;
+    order.reserve(cands.size());
+    if (group_linked)
+    {
+        // Two passes rather than a sort: both groups keep their score ordering
+        // and the pass is stable by construction.
+        for (int i = 0; i < static_cast<int>(cands.size()); ++i)
+            if (row_is_linked(cands[i]))
+                order.push_back(i);
+        for (int i = 0; i < static_cast<int>(cands.size()); ++i)
+            if (!row_is_linked(cands[i]))
+                order.push_back(i);
+    }
+    else
+    {
+        for (int i = 0; i < static_cast<int>(cands.size()); ++i)
+            order.push_back(i);
+    }
+
     ImGuiTableFlags flags =
         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
     ImVec2 table_size(0.f, 280.f);
-    if (ImGui::BeginTable("cands", 9, flags, table_size))
+    if (ImGui::BeginTable("cands", 11, flags, table_size))
     {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("Rank", ImGuiTableColumnFlags_WidthFixed, 50.f);
@@ -813,11 +1152,13 @@ void draw_candidates_table()
         ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 56.f);
         ImGui::TableSetupColumn("R/W", ImGuiTableColumnFlags_WidthFixed, 36.f);
         ImGui::TableSetupColumn("Delta / Fires", ImGuiTableColumnFlags_WidthFixed, 180.f);
+        ImGui::TableSetupColumn("Anchors", ImGuiTableColumnFlags_WidthFixed, 70.f);
+        ImGui::TableSetupColumn("Reacted", ImGuiTableColumnFlags_WidthFixed, 90.f);
         ImGui::TableSetupColumn("Lat (ms)", ImGuiTableColumnFlags_WidthFixed, 80.f);
         ImGui::TableSetupColumn("Dir", ImGuiTableColumnFlags_WidthFixed, 50.f);
         ImGui::TableHeadersRow();
 
-        for (int i = 0; i < static_cast<int>(cands.size()); ++i)
+        for (int i : order)
         {
             const Candidate &c    = cands[i];
             std::string      path = candidate_path(c);
@@ -828,6 +1169,12 @@ void draw_candidates_table()
                 continue;
 
             ImGui::TableNextRow();
+
+            // Tint the paired rows so it stays obvious WHY they are on top —
+            // otherwise a row at the head of the list looks like it simply
+            // outscored everything.
+            if (group_linked && row_is_linked(c))
+                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, ImGui::GetColorU32(ImVec4(0.16f, 0.30f, 0.22f, 1.f)));
 
             ImGui::TableNextColumn();
             char rank_buf[16];
@@ -846,10 +1193,26 @@ void draw_candidates_table()
 
             ImGui::TableNextColumn();
             // Tint Command rows so the eye can sweep down the column quickly.
-            if (c.kind == Kind::Command)
+            if (c.kind == Kind::Command && c.auto_unmuted)
+            {
+                // This command fired during baseline (so it was muted as noise)
+                // but behaved purposefully during Record. Flag it rather than
+                // silently promoting it — the user should know it was suspect.
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f), "Command *");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Fired %d time(s) during baseline, so it was muted as noise.\n"
+                                      "Brought back automatically: %d fire(s) during Record with a\n"
+                                      "median latency of %.0f ms to your \"I Acted Now\" anchors.",
+                                      c.baseline_fires, c.fire_count, static_cast<double>(c.median_latency_ms));
+            }
+            else if (c.kind == Kind::Command)
+            {
                 ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.0f), "Command");
+            }
             else
+            {
                 ImGui::TextUnformatted("DataRef");
+            }
 
             ImGui::TableNextColumn();
             ImGui::Text("%.0f", static_cast<double>(c.score));
@@ -914,6 +1277,52 @@ void draw_candidates_table()
             }
 
             ImGui::TableNextColumn();
+            if (c.anchors_total <= 0)
+            {
+                ImGui::TextDisabled("--");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("No \"I Acted Now\" anchors were placed, so coverage could not be measured.\n"
+                                      "Anchors are the strongest filter this tool has - use them.");
+            }
+            else
+            {
+                // Full coverage with no strays is the signature of the real
+                // target. Colour it so the eye finds those rows immediately.
+                const bool perfect = (c.anchors_hit == c.anchors_total) && c.orphan_events == 0;
+                if (perfect)
+                    ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "%d/%d", c.anchors_hit, c.anchors_total);
+                else
+                    ImGui::Text("%d/%d", c.anchors_hit, c.anchors_total);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Answered %d of your %d actuations, with %d event(s) belonging to none of "
+                                      "them.\nThe more times you work the switch, the harder this is to fake.",
+                                      c.anchors_hit, c.anchors_total, c.orphan_events);
+            }
+
+            // Causal order: how long after your action this ref started moving.
+            // The first mover is the cause; everything behind it is the cascade
+            // that cause set off.
+            ImGui::TableNextColumn();
+            if (!c.has_onset_lag)
+            {
+                ImGui::TextDisabled("--");
+            }
+            else if (c.is_first_mover)
+            {
+                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "1st %.0fms", static_cast<double>(c.onset_lag_ms));
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Reacted before every other candidate - the likely cause.\n"
+                                      "Rows below it moved later and are probably effects of this one.");
+            }
+            else
+            {
+                ImGui::Text("+%.0f ms", static_cast<double>(c.onset_lag_ms));
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Median delay from your action to this ref moving.\n"
+                                      "Later than the first mover, so more likely a downstream effect.");
+            }
+
+            ImGui::TableNextColumn();
             if (c.has_latency)
                 ImGui::Text("%.0f", static_cast<double>(c.min_latency_ms));
             else
@@ -967,6 +1376,85 @@ void draw_candidates_table()
             }
         }
     }
+
+    draw_muted_commands_section();
+}
+
+// Commands muted as baseline noise. Deliberately a full table rather than a
+// plain name list: the whole point of muting-instead-of-dropping is that the
+// evidence survives, so the user can judge for themselves whether something
+// was wrongly filtered. Columns are reduced to what applies to commands.
+void draw_muted_commands_section()
+{
+    const auto &cands = recorder::candidates();
+    const auto &cmds  = command_index::all();
+
+    int muted_rows = 0;
+    for (const auto &c : cands)
+        if (row_is_muted(c))
+            ++muted_rows;
+    if (muted_rows == 0)
+        return;
+
+    ImGui::Spacing();
+    char header[96];
+    snprintf(header, sizeof(header), "Muted as baseline noise (%d)###mutedcmds", muted_rows);
+    if (!ImGui::CollapsingHeader(header))
+        return;
+
+    ImGui::TextWrapped("These commands already fired while the cockpit was idle, so they were muted to keep the "
+                       "list readable. They were still recorded in full - Unmute to move one back up.");
+
+    ImGuiTableFlags flags =
+        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
+    ImVec2 table_size(0.f, 160.f);
+    if (!ImGui::BeginTable("mutedcands", 6, flags, table_size))
+        return;
+
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn("Rank", ImGuiTableColumnFlags_WidthFixed, 50.f);
+    ImGui::TableSetupColumn("Score", ImGuiTableColumnFlags_WidthFixed, 60.f);
+    ImGui::TableSetupColumn("Command", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Baseline", ImGuiTableColumnFlags_WidthFixed, 80.f);
+    ImGui::TableSetupColumn("Record", ImGuiTableColumnFlags_WidthFixed, 70.f);
+    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 80.f);
+    ImGui::TableHeadersRow();
+
+    for (int i = 0; i < static_cast<int>(cands.size()); ++i)
+    {
+        const Candidate &c = cands[i];
+        if (!row_is_muted(c) || c.command_idx >= cmds.size())
+            continue;
+        const std::string &name = cmds[c.command_idx].name;
+        if (s_result_filter[0] != '\0' && !path_matches(name, s_result_filter))
+            continue;
+
+        ImGui::TableNextRow();
+
+        ImGui::TableNextColumn();
+        ImGui::TextDisabled("%d", i + 1);
+
+        ImGui::TableNextColumn();
+        ImGui::TextDisabled("%.0f", static_cast<double>(c.score));
+
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(name.c_str());
+
+        ImGui::TableNextColumn();
+        ImGui::Text("%d fires", c.baseline_fires);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Fires observed while the cockpit was idle. This is why the row was muted.");
+
+        ImGui::TableNextColumn();
+        ImGui::Text("%d fires", c.fire_count);
+
+        ImGui::TableNextColumn();
+        char btn[32];
+        snprintf(btn, sizeof(btn), "Unmute##um%d", i);
+        if (ImGui::SmallButton(btn))
+            command_recorder::set_muted(c.command_idx, false);
+    }
+    ImGui::EndTable();
 }
 
 void draw_test_panel_command(const Candidate &c)
@@ -996,6 +1484,246 @@ void draw_test_panel_command(const Candidate &c)
     ImGui::TextWrapped("Once is the safe default (Begin+End in one call). Begin/End are paired - use only when "
                        "the command is meant to be held (e.g. starter motor). Mismatched Begin/End can leave the "
                        "command stuck.");
+
+    // Let the user push a row back into the muted set. Reachable for any
+    // command row, but mainly for the auto-unmuted ones: if the heuristic
+    // guessed wrong, one click gets the list clean again.
+    if (c.baseline_fires > 0)
+    {
+        ImGui::Spacing();
+        if (ImGui::SmallButton("Mute as noise"))
+            command_recorder::set_muted(c.command_idx, true);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(fired %d time(s) during baseline)", c.baseline_fires);
+    }
+}
+
+// Cascade comparison. Firing the command runs the aircraft's own logic and the
+// whole cascade follows; writing the status DataRef may only move the switch
+// graphic. Measuring both settles the question instead of guessing at it.
+void draw_cascade_compare(const Candidate &c)
+{
+    const auto &cmd_res = recorder::probe_command_result();
+    const auto &ref_res = recorder::probe_dataref_result();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Compare: command vs. direct DataRef write");
+
+    if (recorder::probe_in_progress())
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f), "Measuring... hands off the cockpit.");
+        return;
+    }
+
+    ImGui::TextWrapped("Run both probes, then compare. Each one performs the action and counts how many watched "
+                       "refs move within %.1f s. If the command moves clearly more, the DataRef is only the tip of "
+                       "the cascade and you must send the command.",
+                       1.5);
+
+    // Probe the command side. For a DataRef row we offer the command from its
+    // detected link, so the user never has to hunt for the counterpart.
+    int cmd_candidate = -1;
+    if (c.kind == Kind::Command)
+    {
+        cmd_candidate = s_selected_candidate;
+    }
+    else
+    {
+        for (const auto &l : recorder::command_ref_links())
+        {
+            if (l.logical_ref_idx != c.logical_ref_idx)
+                continue;
+            const auto &cands = recorder::candidates();
+            for (int i = 0; i < static_cast<int>(cands.size()); ++i)
+            {
+                if (cands[i].kind == Kind::Command && cands[i].command_idx == l.command_idx)
+                {
+                    cmd_candidate = i;
+                    break;
+                }
+            }
+            if (cmd_candidate >= 0)
+                break;
+        }
+    }
+
+    ImGui::BeginDisabled(cmd_candidate < 0);
+    if (ImGui::Button("Probe: fire command"))
+        recorder::probe_start(static_cast<std::size_t>(cmd_candidate), recorder::ProbeAction::FireCommand,
+                              SampleValue{});
+    ImGui::EndDisabled();
+    if (cmd_candidate < 0 && ImGui::IsItemHovered())
+        ImGui::SetTooltip("No linked command found for this DataRef - select a Command row instead.");
+
+    // Probe the DataRef side, using whatever the test-panel value box holds.
+    int ref_candidate = -1;
+    if (c.kind == Kind::DataRef)
+    {
+        ref_candidate = s_selected_candidate;
+    }
+    else
+    {
+        for (const auto &l : recorder::command_ref_links())
+        {
+            if (l.command_idx != c.command_idx)
+                continue;
+            const auto &cands = recorder::candidates();
+            for (int i = 0; i < static_cast<int>(cands.size()); ++i)
+            {
+                if (cands[i].kind == Kind::DataRef && cands[i].logical_ref_idx == l.logical_ref_idx)
+                {
+                    ref_candidate = i;
+                    break;
+                }
+            }
+            if (ref_candidate >= 0)
+                break;
+        }
+    }
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(ref_candidate < 0);
+    if (ImGui::Button("Probe: write DataRef"))
+    {
+        const auto &cands = recorder::candidates();
+        SampleValue v{};
+        if (ref_candidate < static_cast<int>(cands.size()))
+        {
+            switch (cands[ref_candidate].type)
+            {
+            case RefType::Int:
+            case RefType::IntArrayElem:
+                v.i = s_write_int;
+                break;
+            case RefType::Float:
+            case RefType::FloatArrayElem:
+                v.f = s_write_float;
+                break;
+            case RefType::Double:
+                v.d = s_write_double;
+                break;
+            }
+        }
+        recorder::probe_start(static_cast<std::size_t>(ref_candidate), recorder::ProbeAction::WriteDataRef, v);
+    }
+    ImGui::EndDisabled();
+    if (ref_candidate < 0 && ImGui::IsItemHovered())
+        ImGui::SetTooltip("No linked DataRef found for this command - select a DataRef row instead.");
+
+    ImGui::SameLine();
+    if (ImGui::Button("Clear##probes"))
+        recorder::probe_clear();
+
+    if (!cmd_res.valid && !ref_res.valid)
+        return;
+
+    ImGui::Spacing();
+    if (ImGui::BeginTable("probes", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+    {
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 120.f);
+        ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Refs moved", ImGuiTableColumnFlags_WidthFixed, 110.f);
+        ImGui::TableHeadersRow();
+
+        auto row = [](const char *label, const recorder::ProbeResult &r)
+        {
+            if (!r.valid)
+                return;
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(label);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(r.action_label.c_str());
+            ImGui::TableNextColumn();
+            ImGui::Text("%d of %d", r.refs_moved, r.refs_sampled);
+        };
+        row("Fire command", cmd_res);
+        row("Write DataRef", ref_res);
+        ImGui::EndTable();
+    }
+
+    // Only draw a conclusion once both sides have actually been measured.
+    // Half a comparison is not evidence.
+    if (!cmd_res.valid || !ref_res.valid)
+    {
+        ImGui::TextDisabled("Run both probes to get a verdict.");
+        return;
+    }
+
+    if (cmd_res.refs_moved > ref_res.refs_moved)
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f),
+                           "The command moved %d more ref(s). Send the COMMAND and read the DataRef for state.",
+                           cmd_res.refs_moved - ref_res.refs_moved);
+    else if (ref_res.refs_moved > cmd_res.refs_moved)
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f),
+                           "The DataRef write moved MORE refs than the command (%d vs %d). Unexpected - the two "
+                           "probes may have started from different switch states. Reset both and retry from the "
+                           "same starting position.",
+                           ref_res.refs_moved, cmd_res.refs_moved);
+    else
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                           "Both moved %d ref(s) - no measurable difference. Writing the DataRef appears equivalent "
+                           "here, but this only covers the refs watched in the last Record.",
+                           cmd_res.refs_moved);
+}
+
+// Slim bar shown instead of the main window while recording, so the cockpit
+// stays reachable. It has to earn its screen space three ways: prove the clicks
+// are being counted, say how long is left, and offer Stop without a hunt.
+void draw_recording_overlay(float screen_w)
+{
+    const auto st = recorder::status();
+
+    constexpr float kBarW   = 460.f;
+    constexpr float kMargin = 16.f;
+    ImGui::SetNextWindowPos(ImVec2(screen_w - kBarW - kMargin, kMargin), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(kBarW, 0.f), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.92f);
+
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                                   ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings |
+                                   ImGuiWindowFlags_AlwaysAutoResize;
+
+    if (!ImGui::Begin("##recbar", nullptr, flags))
+    {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "REC");
+    ImGui::SameLine();
+    ImGui::Text("%.0f s", static_cast<double>(st.record_elapsed_s));
+    ImGui::SameLine();
+
+    // The anchor count is the whole point of the overlay: it is live proof that
+    // clicking the cockpit switch is registering, with no trip back here.
+    if (st.anchors_set > 0)
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "| %d actions", st.anchors_set);
+    else
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f), "| click the switch...");
+
+    ImGui::SameLine();
+    if (st.auto_stop_in_s >= 0.f)
+    {
+        const bool soon = st.auto_stop_in_s < 3.f;
+        ImGui::TextColored(soon ? ImVec4(1.0f, 0.55f, 0.35f, 1.0f) : ImVec4(0.65f, 0.65f, 0.65f, 1.0f), "| ends %.0fs",
+                           static_cast<double>(st.auto_stop_in_s));
+    }
+    else
+    {
+        ImGui::TextDisabled("| manual stop");
+    }
+
+    ImGui::SameLine();
+    // Clicks on this button are consumed by ImGui, so they can never be
+    // mistaken for a cockpit actuation — the anchor hook only fires on clicks
+    // ImGui declined.
+    if (ImGui::Button("Stop"))
+        recorder::stop_record();
+
+    ImGui::TextDisabled("Work the switch several times - every cockpit click counts as one action.");
+    ImGui::End();
 }
 
 void draw_test_panel()
@@ -1018,6 +1746,7 @@ void draw_test_panel()
         if (s_result_filter[0] != '\0' && !path_matches(cmds[c.command_idx].name, s_result_filter))
             return;
         draw_test_panel_command(c);
+        draw_cascade_compare(c);
         return;
     }
 
@@ -1092,6 +1821,8 @@ void draw_test_panel()
     ImGui::TextWrapped("Write executed (or refused). If the cockpit shows no reaction, the DataRef may still be the "
                        "correct one but is read-only, or the aircraft's own logic overwrites it every frame - in that "
                        "case it cannot be driven from outside; look for an associated Command instead.");
+
+    draw_cascade_compare(c);
 }
 
 } // namespace
@@ -1202,6 +1933,15 @@ void draw()
     ImGui_ImplOpenGL2_NewFrame();
     ImGui::NewFrame();
 
+    // During Record the main window steps aside entirely: it would sit between
+    // the user and the cockpit switch they need to reach. Only a slim bar stays
+    // up. The XPLM capture window MUST remain visible throughout — hiding it
+    // would cut off the very clicks we now use as anchors.
+    if (recorder::phase() == Phase::Record)
+    {
+        draw_recording_overlay(static_cast<float>(sw));
+    }
+    else
     {
         float win_w = 980.f, win_h = 720.f;
         ImGui::SetNextWindowPos(
@@ -1222,6 +1962,9 @@ void draw()
             ImGui::Separator();
             draw_button_row();
             ImGui::Separator();
+            // Pairs come before the ranked list: when a link exists it is the
+            // conclusion, and the table below is the supporting evidence.
+            draw_command_ref_links();
             draw_candidates_table();
             draw_test_panel();
         }

@@ -35,11 +35,15 @@
 //
 // Re-enumeration during a session: caller MUST disable() before
 // command_index::rebuild() and re-enable() afterwards, because handle indices
-// shift when the index is rebuilt.
+// shift when the index is rebuilt. Consequence: disable() drops the whole
+// stream vector, so the baseline mute-set is lost across a re-enumeration.
+// That is unavoidable — mutes are keyed by index, and every index moves — so
+// a re-enumeration must be followed by a fresh baseline.
 
 #pragma once
 
 #include "types.hpp"
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -64,6 +68,30 @@ void clear_baseline_diagnostics();
 // Set true while baseline is running so the handler counts fires even
 // though it does NOT push them into streams (baseline is observation-only).
 void set_baseline_phase(bool on);
+
+// ── Baseline noise muting ────────────────────────────────────────────────────
+//
+// Any command that fires (Begin) while set_baseline_phase(true) is active gets
+// muted: hidden from the main candidate list, but still fully recorded during
+// Record. Some aircraft chatter constantly (the AW139 fires
+// sim/autopilot/disconnect/... unprompted), which otherwise drowns the list.
+//
+// Muting never discards data — streams() keeps every event either way, so an
+// unmute in the UI reveals the complete fire history retroactively.
+
+// Master switch (UI, default true). Off restores pre-1.1.4 behaviour.
+void set_mute_enabled(bool on);
+bool mute_enabled();
+
+// Manual override from the UI ("Unmute" / "Mute again"). Out-of-range indices
+// are ignored.
+void set_muted(std::size_t command_idx, bool on);
+bool is_muted(std::size_t command_idx);
+int  muted_count();
+
+// Drop every mute. Baseline is a resetting phase and calls this; Learn Ambient
+// is additive by design and deliberately does not.
+void clear_mutes();
 
 const std::vector<CommandEventStream> &streams();
 

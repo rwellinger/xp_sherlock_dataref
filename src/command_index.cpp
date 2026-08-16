@@ -236,6 +236,118 @@ bool process_command_file(const std::string &path, FileStats &st)
     return true;
 }
 
+// ── Generic name harvesting from aircraft assets ─────────────────────────────
+//
+// Most aircraft ship NO *_Commands.txt — that is a Zibo convention. They
+// register their commands at runtime (xlua, SASL, FlyWithLua, or a private C++
+// plugin), which the SDK cannot enumerate. Those commands are still findable by
+// name via XPLMFindCommand; we just have to learn the names from somewhere.
+//
+// Two file-based channels cover this without knowing anything about the
+// aircraft's vendor or scripting engine:
+//
+//   .obj  — ATTR_manip_command* is the X-Plane standard for a clickable cockpit
+//           surface. These are exactly the commands sitting behind switches.
+//   .lua  — the common registration idioms across every scripting engine.
+//
+// Every harvested name is verified with XPLMFindCommand before it enters the
+// index, so a false positive from a loose scan costs one lookup and vanishes.
+
+// A command path looks like a/b/c: at least one '/', and only characters that
+// are legal in the SDK's command names. Anything else is not worth a lookup.
+bool looks_like_command_path(const std::string &s)
+{
+    if (s.size() < 3 || s.size() > 250)
+        return false;
+    bool has_slash = false;
+    for (char c : s)
+    {
+        const auto u = static_cast<unsigned char>(c);
+        if (c == '/')
+        {
+            has_slash = true;
+            continue;
+        }
+        if (std::isalnum(u) || c == '_' || c == '-' || c == '.')
+            continue;
+        return false;
+    }
+    // Reject leading/trailing slash — never valid, and a sign we grabbed a
+    // fragment rather than a whole name.
+    return has_slash && s.front() != '/' && s.back() != '/';
+}
+
+// Pull every quoted or whitespace-delimited token out of `line` that could be a
+// command path, and hand each to `sink`. Deliberately dumb: correctness comes
+// from XPLMFindCommand downstream, not from parsing precision. That keeps this
+// working across scripting dialects we have never seen.
+template <typename Sink> void harvest_paths_from_line(const std::string &line, Sink &&sink)
+{
+    const std::size_t n = line.size();
+    std::size_t       i = 0;
+    while (i < n)
+    {
+        const char c = line[i];
+        // Skip comments — both Lua (--) and OBJ (#) styles.
+        if (c == '#' || (c == '-' && i + 1 < n && line[i + 1] == '-'))
+            return;
+
+        const bool quote = (c == '"' || c == '\'');
+        if (quote)
+        {
+            const char        q   = c;
+            const std::size_t beg = ++i;
+            while (i < n && line[i] != q)
+                ++i;
+            if (i <= n)
+            {
+                std::string tok = line.substr(beg, i - beg);
+                if (looks_like_command_path(tok))
+                    sink(tok);
+            }
+            ++i;
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(c)))
+        {
+            ++i;
+            continue;
+        }
+        const std::size_t beg = i;
+        while (i < n && !std::isspace(static_cast<unsigned char>(line[i])) && line[i] != '"' && line[i] != '\'')
+            ++i;
+        std::string tok = line.substr(beg, i - beg);
+        if (looks_like_command_path(tok))
+            sink(tok);
+    }
+}
+
+// Case-insensitive substring search, for spotting the marker keywords.
+bool contains_ci(const std::string &hay, const char *needle)
+{
+    const std::size_t n = std::strlen(needle);
+    if (n > hay.size())
+        return false;
+    for (std::size_t i = 0; i + n <= hay.size(); ++i)
+    {
+        std::size_t k = 0;
+        while (k < n && std::tolower(static_cast<unsigned char>(hay[i + k])) ==
+                            std::tolower(static_cast<unsigned char>(needle[k])))
+            ++k;
+        if (k == n)
+            return true;
+    }
+    return false;
+}
+
+// Marker keywords per channel. A line must contain one of these before we bother
+// harvesting from it — this is what keeps the scan from turning into a
+// free-text sweep of every string in the aircraft.
+constexpr const char *OBJ_MARKERS[]    = {"ATTR_manip_command"};
+constexpr const char *SCRIPT_MARKERS[] = {"create_command", "find_command",   "createCommand", "findCommand",
+                                          "command_once",   "commandOnce",    "command_begin", "commandBegin",
+                                          "sasl.command",   "XPLMFindCommand"};
+
 // Case-insensitive suffix match (filenames are case-insensitive on macOS/Win).
 bool ends_with_ci(const std::string &s, const char *suffix)
 {
@@ -264,6 +376,122 @@ std::string user_aircraft_dir()
         return {};
     const std::size_t slash = p.find_last_of("/\\");
     return (slash == std::string::npos) ? std::string{} : p.substr(0, slash + 1);
+}
+
+// Scan one asset file for command names. `markers` gates which lines are worth
+// harvesting from. Registers everything that resolves; returns how many did.
+int harvest_file(const std::string &path, const char *const *markers, std::size_t marker_count, FileStats &st)
+{
+    std::ifstream in(path);
+    if (!in.is_open())
+        return 0;
+
+    int         found = 0;
+    std::string line;
+    while (std::getline(in, line))
+    {
+        ++st.total_lines;
+
+        bool marked = false;
+        for (std::size_t m = 0; m < marker_count && !marked; ++m)
+            marked = contains_ci(line, markers[m]);
+        if (!marked)
+            continue;
+
+        harvest_paths_from_line(line,
+                                [&](const std::string &name)
+                                {
+                                    ++st.parsed;
+                                    if (starts_with(name, PRIVATE_PREFIX, PRIVATE_PREFIX_LEN))
+                                    {
+                                        ++st.skipped_filter;
+                                        return;
+                                    }
+                                    for (const auto &px : s_user_exclusions)
+                                    {
+                                        if (!px.empty() && starts_with(name, px.c_str(), px.size()))
+                                        {
+                                            ++st.skipped_filter;
+                                            return;
+                                        }
+                                    }
+                                    // try_register() dedups against s_indexed_names and
+                                    // verifies via XPLMFindCommand, so a bad guess is free.
+                                    if (try_register(name, std::string{}))
+                                    {
+                                        ++st.resolved;
+                                        ++found;
+                                    }
+                                    else
+                                    {
+                                        ++st.unresolved;
+                                    }
+                                });
+    }
+    return found;
+}
+
+// Cap on how many asset files we will open in one rebuild. Payware aircraft can
+// carry thousands of objects and liveries; without a ceiling a rebuild could
+// stall the sim for seconds. Reaching the cap is logged, never silent.
+constexpr int MAX_SCANNED_ASSET_FILES = 4000;
+
+// Walk the aircraft folder and harvest from every .obj and script file.
+// Recursive because cockpit objects and scripts live in subfolders whose names
+// vary by vendor (objects/, cockpit_3D/, plugins/xlua/scripts/, ...).
+struct AssetScanResult
+{
+    int  obj_files       = 0;
+    int  obj_resolved    = 0;
+    int  script_files    = 0;
+    int  script_resolved = 0;
+    int  files_seen      = 0;
+    bool hit_cap         = false;
+};
+
+AssetScanResult harvest_aircraft_assets(const std::string &ac_dir)
+{
+    AssetScanResult r{};
+    if (ac_dir.empty())
+        return r;
+
+    std::error_code ec;
+    // skip_permission_denied: a livery or fmod folder we cannot read must not
+    // abort the whole walk.
+    std::filesystem::recursive_directory_iterator it(ac_dir, std::filesystem::directory_options::skip_permission_denied,
+                                                     ec);
+    const std::filesystem::recursive_directory_iterator end;
+
+    for (; !ec && it != end; it.increment(ec))
+    {
+        if (r.files_seen >= MAX_SCANNED_ASSET_FILES)
+        {
+            r.hit_cap = true;
+            break;
+        }
+        std::error_code fec;
+        if (!it->is_regular_file(fec) || fec)
+            continue;
+
+        const std::string path  = it->path().string();
+        const std::string fname = it->path().filename().string();
+
+        FileStats st{};
+        if (ends_with_ci(fname, ".obj"))
+        {
+            ++r.files_seen;
+            ++r.obj_files;
+            r.obj_resolved += harvest_file(path, OBJ_MARKERS, sizeof(OBJ_MARKERS) / sizeof(OBJ_MARKERS[0]), st);
+        }
+        else if (ends_with_ci(fname, ".lua") || ends_with_ci(fname, ".slua"))
+        {
+            ++r.files_seen;
+            ++r.script_files;
+            r.script_resolved +=
+                harvest_file(path, SCRIPT_MARKERS, sizeof(SCRIPT_MARKERS) / sizeof(SCRIPT_MARKERS[0]), st);
+        }
+    }
+    return r;
 }
 
 } // namespace
@@ -327,6 +555,11 @@ void rebuild()
         }
     }
 
+    // ── Source 3: aircraft assets (.obj manipulators, scripts) ──
+    // Runs last so the cheap, authoritative text sources win the dedup race and
+    // keep their descriptions; asset-harvested names have none.
+    const AssetScanResult assets = harvest_aircraft_assets(ac_dir);
+
     char banner[480];
     if (used_fallback)
     {
@@ -344,6 +577,18 @@ void rebuild()
                  s_index.size());
     }
     XPLMDebugString(banner);
+
+    // Asset provenance on its own line — this is what tells you whether an
+    // aircraft's custom commands are being watched at all. Zero here plus zero
+    // aircraft files means only stock commands are hooked, and no switch bound
+    // to a custom command can ever be detected.
+    char asset_banner[320];
+    snprintf(asset_banner, sizeof(asset_banner),
+             "[xp_sherlock] Aircraft assets scanned: %d .obj (%d commands), %d script files (%d commands)%s\n",
+             assets.obj_files, assets.obj_resolved, assets.script_files, assets.script_resolved,
+             assets.hit_cap ? " [SCAN CAPPED - some files were not read]" : "");
+    XPLMDebugString(asset_banner);
+
     XPLMDebugString("[xp_sherlock] Note: late-binding aircraft/plugin commands may not be present yet. "
                     "Use Re-enumerate after aircraft load.\n");
 

@@ -32,10 +32,12 @@
 
 #pragma once
 
+#include "correlator.hpp"
 #include "dataref_index.hpp"
 #include "types.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace xp_sherlock
@@ -53,6 +55,10 @@ enum class Phase : std::uint8_t
     // moves is added to the ignore-set, so the subsequent Record subtracts
     // that whole cascade. Target-blind: it only needs you to drive the noise.
     NoiseCapture,
+    // Short measurement window after a single deliberate action (fire a command
+    // or write a DataRef). Records which refs moved as a result, so two actions
+    // can be compared by the size of the cascade they trigger. See probe_*().
+    Probe,
 };
 
 namespace recorder
@@ -64,7 +70,12 @@ void stop();
 Phase phase();
 
 // Start Phase 1. Asks dataref_index to (re)build if needed, resets ignore_set.
-void start_baseline(float baseline_seconds = 2.5f);
+//
+// Default raised from 2.5 s: aircraft that chatter on a slow cycle (the AW139
+// re-fires sim/autopilot/disconnect every few seconds) can sit out a short
+// window entirely and escape the noise filter. On a badly behaved aircraft,
+// push this to 10-15 s.
+void start_baseline(float baseline_seconds = 5.0f);
 
 // Begin/end additive noise capture (the "Mark as noise" subtract step). While
 // active, any ref that moves relative to the baseline is added to the
@@ -77,7 +88,11 @@ void stop_noise_capture();
 // Begin Phase 2. Allocates ring buffers + EventStreams sized to
 // `watched_refs = all - ignore_set`. Returns false (and stays in Idle) if
 // the watched-ref count exceeds the safety cap.
-bool start_record(bool expect_bidirectional, int expected_clicks);
+//
+// Only the switch KIND is passed in. How many times the user actuates is read
+// from the anchors they place during the run, so there is no count to configure
+// up front and none to get wrong.
+bool start_record(bool expect_bidirectional);
 
 // Auto-stop preference (default: enabled). When disabled, Record runs until
 // the user clicks Stop — useful on large displays where mouse travel between
@@ -99,6 +114,59 @@ void reset();
 const std::vector<Candidate> &candidates();
 const LogicalRef             *logical_ref_at(std::size_t logical_idx);
 
+// Command→DataRef couplings found in the last Record window, tightest first.
+// Empty until stop_record() has run. See correlator.hpp for what a link means.
+const std::vector<CommandRefLink> &command_ref_links();
+
+// Was this logical ref excluded as baseline noise? A target ref that twitched
+// during the baseline is dropped from the whole recording and would otherwise
+// be untraceable — the user sees neither the ref nor a reason for its absence.
+bool is_ignored_as_noise(std::size_t logical_idx);
+
+// ── Cascade probe ────────────────────────────────────────────────────────────
+//
+// Answers "should I send the command or write the DataRef?" by measurement
+// rather than heuristics.
+//
+// Firing the command runs the aircraft's own logic, so the whole cascade
+// follows: relays, buses, annunciators. Writing the status DataRef directly may
+// only move the switch graphic while the systems behind it never notice. Run
+// one probe per action and compare how many refs each one actually moved — if
+// the command moves substantially more, the DataRef is only the tip and you
+// must send the command.
+//
+// A probe snapshots every watched ref, performs the action, samples for
+// PROBE_WINDOW_S, then reports what changed. Requires a completed Record (the
+// watched set comes from it).
+
+enum class ProbeAction : std::uint8_t
+{
+    FireCommand,
+    WriteDataRef,
+};
+
+struct ProbeResult
+{
+    bool                     valid        = false;
+    ProbeAction              action       = ProbeAction::FireCommand;
+    int                      refs_moved   = 0;
+    int                      refs_sampled = 0;
+    std::string              action_label; // what was fired/written, for the UI
+    std::vector<std::size_t> moved_refs;   // logical indices, for the diff view
+};
+
+// Start a probe on the given candidate. Returns false if no Record has run, a
+// probe/record is already active, or the candidate cannot be actioned (e.g. a
+// read-only DataRef). `value` is used only for ProbeAction::WriteDataRef.
+bool probe_start(std::size_t candidate_idx, ProbeAction action, SampleValue value);
+bool probe_in_progress();
+
+// Results of the two most recent probes, kept separately so they can be shown
+// side by side. Invalid until the corresponding probe has completed.
+const ProbeResult &probe_command_result();
+const ProbeResult &probe_dataref_result();
+void               probe_clear();
+
 // Status info for the UI status bar.
 struct Status
 {
@@ -114,6 +182,12 @@ struct Status
     bool  auto_stop_armed      = false;
     int   best_events_so_far   = 0; // largest event-count across all streams during Record
     int   anchors_set          = 0; // how many "I Acted Now" stamps the user has placed
+    int   muted_command_count  = 0; // commands muted as baseline noise
+    // Seconds until auto-stop fires, or -1 when it is not armed (no anchors
+    // yet, auto-stop disabled, or still inside the minimum record window).
+    // Surfaced so the user can see they have time for another cycle instead of
+    // being stopped without warning.
+    float auto_stop_in_s = -1.f;
 };
 Status status();
 

@@ -38,6 +38,7 @@ bool     s_baseline_phase = false;
 float    s_record_start_t = 0.f;
 uint32_t s_frame_at_start = 0;
 int      s_baseline_fires = 0;
+bool     s_mute_enabled   = true;
 
 std::vector<CommandEventStream> s_streams;
 // Track registered handles in lock-step with what we asked for, so disable()
@@ -67,17 +68,31 @@ float now_sec()
 // observe passively without suppressing anyone.
 int command_cb(XPLMCommandRef /*cmd*/, XPLMCommandPhase phase, void *refcon)
 {
-    if (s_baseline_phase && phase == xplm_CommandBegin)
-        ++s_baseline_fires;
+    std::uintptr_t idx_raw = reinterpret_cast<std::uintptr_t>(refcon);
+    if (idx_raw >= s_streams.size())
+        return 1;
+    auto idx = static_cast<std::size_t>(idx_raw);
+
+    if (s_baseline_phase)
+    {
+        // Baseline / Learn Ambient stays observation-only: we mark the command
+        // but push nothing into its stream. Only Begin counts — Continue fires
+        // every frame for a held command and would skew every statistic here.
+        if (phase == xplm_CommandBegin)
+        {
+            ++s_baseline_fires;
+            ++s_streams[idx].baseline_begin_fires;
+            if (s_mute_enabled)
+                s_streams[idx].muted = true;
+        }
+        return 1;
+    }
 
     if (!s_recording)
         return 1;
 
-    std::uintptr_t idx_raw = reinterpret_cast<std::uintptr_t>(refcon);
-    if (idx_raw >= s_streams.size())
-        return 1;
-
-    auto             idx = static_cast<std::size_t>(idx_raw);
+    // Muted commands are recorded exactly like any other. Muting only decides
+    // where a row is shown, never whether it is captured.
     CommandFireEvent ev{};
     ev.frame = s_frame_at_start; // best-effort; recorder owns the live frame counter
     ev.t_sec = now_sec() - s_record_start_t;
@@ -147,6 +162,8 @@ void begin_record(float record_start_t_sec, uint32_t frame_counter_at_start)
     s_record_start_t = record_start_t_sec;
     s_frame_at_start = frame_counter_at_start;
     // Clear any previous events but keep the stream count == command_index size.
+    // `muted` / `baseline_begin_fires` deliberately survive: they are exactly
+    // the baseline knowledge this record run is supposed to filter against.
     for (auto &s : s_streams)
     {
         s.events.clear();
@@ -162,7 +179,9 @@ void reset()
     for (auto &s : s_streams)
     {
         s.events.clear();
-        s.last_phase = 0xFF;
+        s.last_phase           = 0xFF;
+        s.baseline_begin_fires = 0;
+        s.muted                = false;
     }
     s_recording      = false;
     s_baseline_fires = 0;
@@ -173,6 +192,36 @@ bool is_enabled() { return s_enabled; }
 int  baseline_fires_observed() { return s_baseline_fires; }
 void clear_baseline_diagnostics() { s_baseline_fires = 0; }
 void set_baseline_phase(bool on) { s_baseline_phase = on; }
+
+void set_mute_enabled(bool on) { s_mute_enabled = on; }
+bool mute_enabled() { return s_mute_enabled; }
+
+void set_muted(std::size_t command_idx, bool on)
+{
+    if (command_idx >= s_streams.size())
+        return;
+    s_streams[command_idx].muted = on;
+}
+
+bool is_muted(std::size_t command_idx) { return (command_idx < s_streams.size()) && s_streams[command_idx].muted; }
+
+int muted_count()
+{
+    int n = 0;
+    for (const auto &s : s_streams)
+        if (s.muted)
+            ++n;
+    return n;
+}
+
+void clear_mutes()
+{
+    for (auto &s : s_streams)
+    {
+        s.muted                = false;
+        s.baseline_begin_fires = 0;
+    }
+}
 
 const std::vector<CommandEventStream> &streams() { return s_streams; }
 
