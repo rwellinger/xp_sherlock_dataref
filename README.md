@@ -8,7 +8,7 @@ An X-Plane 12 plugin that finds the `sim/...` DataRef driving a cockpit switch
 
 |⚠️ Note about x-plane.org ⚠️ |
 | --- |
-| I no longer support x-plane.org. These plugins are not available there any more. GitHub is the only place where they are released and updated. |
+| I no longer support x-plane.org. These plugins are not available there any more. GitHub is the only place where they are released and updated. More Info here https://github.com/rwellinger/xp_sherlock_dataref/issues/1 |
 
 
 ## Why
