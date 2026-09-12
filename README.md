@@ -5,6 +5,12 @@ An X-Plane 12 plugin that finds the `sim/...` DataRef driving a cockpit switch
 
 ![DataRef Detective — Inspect phase, showing a detected command/DataRef pair above the ranked candidates](images/new_sharlok_1.jpg)
 
+
+|⚠️ Note about x-plane.org ⚠️ |
+| --- |
+| I no longer support x-plane.org. These plugins are not available there any more. GitHub is the only place where they are released and updated. |
+
+
 ## Why
 
 Some aircraft do not register their own branded DataRefs. Instead they repurpose unused default `sim/...`
