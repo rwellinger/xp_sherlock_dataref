@@ -3,6 +3,9 @@
 An X-Plane 12 plugin that finds the `sim/...` DataRef driving a cockpit switch
 **by behavioural correlation**, not by name.
 
+Download and project website:
+[thwelly.ch/xplane-plugins/xp-sherlock-dataref](https://thwelly.ch/xplane-plugins/xp-sherlock-dataref/)
+
 ![DataRef Detective — Inspect phase, showing a detected command/DataRef pair above the ranked candidates](images/new_sharlok_1.jpg)
 
 
