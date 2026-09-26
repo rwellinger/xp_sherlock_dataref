@@ -321,11 +321,12 @@ make setup        # downloads X-Plane SDK 4.3.0, Dear ImGui 1.91.9,
 make build        # universal arm64 + x86_64 .xpl
 make test         # SDK-free unit tests for change-detector + correlator
 make install      # codesign + copy to:
-                  #   $(XPLANE_ROOT)/Resources/available plugins/xp_sherlock_dataref/mac_x64/
+                  #   $(XPLANE_ROOT)/xplaunchData/Plugins/xp_sherlock_dataref/mac_x64/
+                  #   (falls back to Resources/plugins/ without XPLaunch)
 ```
 
-`XPLANE_ROOT` defaults to `/Users/robertw/X-Plane 12` — edit the `Makefile`
-if yours differs.
+`XPLANE_ROOT` defaults to `/Users/robertw/X-Plane 12` — override it if yours
+differs: `XPLANE_ROOT="/path/to/X-Plane 12" make install`.
 
 After `make install`, activate the plugin via XLauncher and restart X-Plane.
 
