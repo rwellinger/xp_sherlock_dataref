@@ -8,12 +8,6 @@ Download and project website:
 
 ![DataRef Detective — Inspect phase, showing a detected command/DataRef pair above the ranked candidates](images/new_sharlok_1.jpg)
 
-
-|⚠️ Note about x-plane.org ⚠️ |
-| --- |
-| I no longer support x-plane.org. These plugins are not available there any more. GitHub is the only place where they are released and updated. More Info here https://github.com/rwellinger/xp_sherlock_dataref/issues/1 |
-
-
 ## Why
 
 Some aircraft do not register their own branded DataRefs. Instead they repurpose unused default `sim/...`
