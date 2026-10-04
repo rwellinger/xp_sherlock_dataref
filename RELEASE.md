@@ -2,7 +2,7 @@
 
 Native plugin for **macOS (arm64 + x86_64 universal binary)**, **Linux (x86_64)** and **Windows**. Finds the DataRef a cockpit switch drives by behavioural correlation, for aircraft that repurpose unbranded `sim/...` DataRefs where name-based search fails.
 
-### What's New in v1.2.1 (unreleased)
+### What's New in v1.2.1 
 
   - **A stability release** — a user reported X-Plane crashing as soon as they clicked **Learn Baseline**. The report came without a log or OS, and the crash does not reproduce on macOS. This release fixes the one platform-specific crash path found in that code, makes sure no exception of ours can take the sim down, and adds log lines so the next crash report points at its cause.
   - **Fixed: Windows crash when the aircraft folder contains non-ASCII file names** — Learn Baseline (and the automatic re-enumeration after an aircraft load) scans the aircraft folder for command names. On Windows, file names were converted through the system ANSI code page, and that conversion **throws** for any character the code page cannot represent: a livery named in Greek, Polish, Cyrillic or Chinese, or one containing an emoji, was enough. The exception was not caught and terminated X-Plane.
