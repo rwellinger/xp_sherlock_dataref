@@ -67,17 +67,21 @@ void trim(std::string &s)
         s = s.substr(b, e - b);
 }
 
-// Locate <X-Plane root>/Resources/plugins/Commands.txt via the XPLM. We rely on
-// XPLM_USE_NATIVE_PATHS being enabled in XPluginStart so the path is a real
-// POSIX/Windows path, not the legacy HFS-style one.
-std::string find_commands_txt_path()
+// Paths cross the XPLM boundary as UTF-8 (XPLM_USE_NATIVE_PATHS, enabled in
+// XPluginStart). They must go through u8path()/u8string() rather than the plain
+// std::string overloads: on Windows/MSVC those convert via the ANSI code page,
+// which misreads non-ASCII install paths and makes path::string() THROW
+// std::system_error for any file name the code page cannot represent (a livery
+// named in Greek or Chinese is enough). macOS/Linux are UTF-8 natively, so the
+// plain overloads only ever failed on Windows.
+std::filesystem::path path_from_xplm(const char *utf8) { return std::filesystem::u8path(utf8); }
+
+// Locate <X-Plane root>/Resources/plugins/Commands.txt via the XPLM.
+std::filesystem::path find_commands_txt_path()
 {
     char sys[1024] = {0};
     XPLMGetSystemPath(sys);
-    std::string base = sys;
-    if (!base.empty() && base.back() != '/' && base.back() != '\\')
-        base += '/';
-    return base + "Resources/plugins/Commands.txt";
+    return path_from_xplm(sys) / "Resources" / "plugins" / "Commands.txt";
 }
 
 // Parse one Commands.txt line into (name, description). The X-Plane file is
@@ -191,7 +195,7 @@ struct FileStats
 // Shared by the global Resources/plugins/Commands.txt and the aircraft-local
 // *_Commands.txt files — both use the same whitespace-separated format. Returns
 // false if the file could not be opened.
-bool process_command_file(const std::string &path, FileStats &st)
+bool process_command_file(const std::filesystem::path &path, FileStats &st)
 {
     std::ifstream in(path);
     if (!in.is_open())
@@ -363,24 +367,21 @@ bool ends_with_ci(const std::string &s, const char *suffix)
     return true;
 }
 
-// Directory containing the user aircraft's .acf (trailing separator included),
-// or empty if it cannot be determined. Relies on XPLM_USE_NATIVE_PATHS (enabled
-// in XPluginStart) so the path is a real POSIX/Windows path.
-std::string user_aircraft_dir()
+// Directory containing the user aircraft's .acf, or empty if it cannot be
+// determined.
+std::filesystem::path user_aircraft_dir()
 {
     char file_name[256] = {0};
     char acf_path[1024] = {0};
     XPLMGetNthAircraftModel(XPLM_USER_AIRCRAFT, file_name, acf_path);
-    std::string p = acf_path;
-    if (p.empty())
+    if (acf_path[0] == '\0')
         return {};
-    const std::size_t slash = p.find_last_of("/\\");
-    return (slash == std::string::npos) ? std::string{} : p.substr(0, slash + 1);
+    return path_from_xplm(acf_path).parent_path();
 }
 
 // Scan one asset file for command names. `markers` gates which lines are worth
 // harvesting from. Registers everything that resolves; returns how many did.
-int harvest_file(const std::string &path, const char *const *markers, std::size_t marker_count, FileStats &st)
+int harvest_file(const std::filesystem::path &path, const char *const *markers, std::size_t marker_count, FileStats &st)
 {
     std::ifstream in(path);
     if (!in.is_open())
@@ -449,7 +450,7 @@ struct AssetScanResult
     bool hit_cap         = false;
 };
 
-AssetScanResult harvest_aircraft_assets(const std::string &ac_dir)
+AssetScanResult harvest_aircraft_assets(const std::filesystem::path &ac_dir)
 {
     AssetScanResult r{};
     if (ac_dir.empty())
@@ -473,8 +474,8 @@ AssetScanResult harvest_aircraft_assets(const std::string &ac_dir)
         if (!it->is_regular_file(fec) || fec)
             continue;
 
-        const std::string path  = it->path().string();
-        const std::string fname = it->path().filename().string();
+        const std::filesystem::path &path  = it->path();
+        const std::string            fname = path.filename().u8string();
 
         FileStats st{};
         if (ends_with_ci(fname, ".obj"))
@@ -506,9 +507,9 @@ void rebuild()
     s_built = false;
 
     // ── Source 1: stock X-Plane commands (Resources/plugins/Commands.txt) ──
-    const std::string path = find_commands_txt_path();
-    FileStats         global{};
-    bool              used_fallback = false;
+    const std::filesystem::path path = find_commands_txt_path();
+    FileStats                   global{};
+    bool                        used_fallback = false;
 
     if (!process_command_file(path, global))
     {
@@ -529,9 +530,9 @@ void rebuild()
     // The SDK cannot enumerate runtime-registered commands, so custom aircraft
     // (e.g. the Zibo 737) ship their command names in <aircraft>/*_Commands.txt.
     // This is the same source DataRefTool reads — no network/REST API involved.
-    int               aircraft_files    = 0;
-    int               aircraft_resolved = 0;
-    const std::string ac_dir            = user_aircraft_dir();
+    int                         aircraft_files    = 0;
+    int                         aircraft_resolved = 0;
+    const std::filesystem::path ac_dir            = user_aircraft_dir();
     if (!ac_dir.empty())
     {
         std::error_code                           ec;
@@ -542,12 +543,12 @@ void rebuild()
             std::error_code fec;
             if (!it->is_regular_file(fec) || fec)
                 continue;
-            const std::string fname = it->path().filename().string();
+            const std::string fname = it->path().filename().u8string();
             if (!ends_with_ci(fname, "Commands.txt"))
                 continue;
 
             FileStats st{};
-            if (process_command_file(it->path().string(), st))
+            if (process_command_file(it->path(), st))
             {
                 ++aircraft_files;
                 aircraft_resolved += st.resolved;
@@ -558,6 +559,15 @@ void rebuild()
     // ── Source 3: aircraft assets (.obj manipulators, scripts) ──
     // Runs last so the cheap, authoritative text sources win the dedup race and
     // keep their descriptions; asset-harvested names have none.
+    // Breadcrumb: the asset walk touches every file under the aircraft folder.
+    // If a log ends here, the walk itself is where things went wrong.
+    {
+        const std::string ac_dir_utf8 = ac_dir.u8string();
+        char              scan_msg[1200];
+        snprintf(scan_msg, sizeof(scan_msg), "[xp_sherlock] Scanning aircraft assets in %s ...\n",
+                 ac_dir_utf8.empty() ? "(no aircraft path)" : ac_dir_utf8.c_str());
+        XPLMDebugString(scan_msg);
+    }
     const AssetScanResult assets = harvest_aircraft_assets(ac_dir);
 
     char banner[480];
@@ -573,8 +583,8 @@ void rebuild()
         snprintf(banner, sizeof(banner),
                  "[xp_sherlock] Command index: global %s (%d parsed, %d resolved, %d filtered); "
                  "aircraft files: %d (%d resolved). Total indexed: %zu.\n",
-                 path.c_str(), global.parsed, global.resolved, global.skipped_filter, aircraft_files, aircraft_resolved,
-                 s_index.size());
+                 path.u8string().c_str(), global.parsed, global.resolved, global.skipped_filter, aircraft_files,
+                 aircraft_resolved, s_index.size());
     }
     XPLMDebugString(banner);
 

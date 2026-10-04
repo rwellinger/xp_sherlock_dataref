@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 
 namespace xp_sherlock
 {
@@ -427,8 +428,16 @@ bool ensure_baseline_arrays_seeded()
         return false;
     s_baseline_value.assign(refs.size(), SampleValue{});
     s_baseline_changed.assign(refs.size(), false);
+    // Breadcrumb pair around the first read of every plugin's DataRef accessors.
+    // A buggy foreign accessor crashes inside its own module where we cannot
+    // catch it; a log that ends on "reading" without "seeded" pins it there.
+    char msg[160];
+    snprintf(msg, sizeof(msg), "[xp_sherlock] Baseline: reading %zu refs (first read of all plugins' datarefs) ...\n",
+             refs.size());
+    XPLMDebugString(msg);
     for (std::size_t i = 0; i < refs.size(); ++i)
         dataref_index::read(refs[i], s_baseline_value[i]);
+    XPLMDebugString("[xp_sherlock] Baseline: reference values seeded.\n");
     return true;
 }
 
@@ -656,7 +665,7 @@ void finalize_probe()
     XPLMDebugString(msg);
 }
 
-float flight_loop_cb(float, float, int, void *)
+float run_phase_tick()
 {
     float now = now_sec();
     switch (s_phase)
@@ -693,6 +702,30 @@ float flight_loop_cb(float, float, int, void *)
     default:
         return 0.f;
     }
+}
+
+// XPLM entry point. Exceptions must not unwind into X-Plane (that terminates the
+// sim); on one we drop back to Idle and deactivate the loop so it cannot repeat
+// every frame.
+float flight_loop_cb(float, float, int, void *)
+{
+    try
+    {
+        return run_phase_tick();
+    }
+    catch (const std::exception &e)
+    {
+        char msg[320];
+        snprintf(msg, sizeof(msg), "[xp_sherlock] ERROR: flight loop threw: %s - recorder reset to Idle.\n", e.what());
+        XPLMDebugString(msg);
+    }
+    catch (...)
+    {
+        XPLMDebugString("[xp_sherlock] ERROR: flight loop threw unknown exception - recorder reset to Idle.\n");
+    }
+    s_phase = Phase::Idle;
+    command_recorder::set_baseline_phase(false);
+    return 0.f;
 }
 
 void ensure_flight_loop_registered()

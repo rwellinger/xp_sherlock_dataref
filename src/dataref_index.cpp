@@ -75,6 +75,13 @@ void rebuild()
     std::vector<XPLMDataRef> handles(static_cast<std::size_t>(total));
     XPLMGetDataRefsByIndex(0, total, handles.data());
 
+    // Breadcrumb: the loop below calls every plugin's array-size accessor. A
+    // foreign accessor that mishandles the null buffer crashes in its own module;
+    // a log ending on this line points there rather than at us.
+    char start_msg[128];
+    snprintf(start_msg, sizeof(start_msg), "[xp_sherlock] Enumerating %d datarefs ...\n", total);
+    XPLMDebugString(start_msg);
+
     s_index.reserve(static_cast<std::size_t>(total));
 
     int skipped_data          = 0;

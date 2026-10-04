@@ -34,14 +34,37 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <string>
 
 using namespace xp_sherlock;
 
+// An exception escaping a callback unwinds into X-Plane's C code, which ends in
+// std::terminate and takes the whole sim down. Every callback XPLM invokes must
+// therefore stop exceptions here and turn them into a log line instead.
+static void log_callback_exception(const char *where, const char *what)
+{
+    char msg[512];
+    snprintf(msg, sizeof(msg), "[xp_sherlock] ERROR: %s threw: %s\n", where, what);
+    XPLMDebugString(msg);
+}
+
 // ── Draw callback (xplm_Phase_Window) ────────────────────────────────────────
 static int DrawCallback(XPLMDrawingPhase, int, void *)
 {
-    ui::draw();
+    // Covers every UI button handler, including Learn Baseline's index rebuild.
+    try
+    {
+        ui::draw();
+    }
+    catch (const std::exception &e)
+    {
+        log_callback_exception("draw callback", e.what());
+    }
+    catch (...)
+    {
+        log_callback_exception("draw callback", "unknown exception");
+    }
     return 1;
 }
 
@@ -80,7 +103,18 @@ static constexpr float kReenumDelaySeconds = 1.0f;
 
 static float ReenumFlightLoop(float, float, int, void *)
 {
-    ui::reenumerate();
+    try
+    {
+        ui::reenumerate();
+    }
+    catch (const std::exception &e)
+    {
+        log_callback_exception("aircraft-load re-enumeration", e.what());
+    }
+    catch (...)
+    {
+        log_callback_exception("aircraft-load re-enumeration", "unknown exception");
+    }
     // Returning 0 only deactivates the callback (it stays registered, per the
     // XPLM contract); unregister explicitly so nothing lingers.
     XPLMUnregisterFlightLoopCallback(ReenumFlightLoop, nullptr);
