@@ -72,10 +72,23 @@ static int DrawCallback(XPLMDrawingPhase, int, void *)
 static XPLMCommandRef s_cmd_toggle  = nullptr;
 static XPLMMenuID     s_plugin_menu = nullptr;
 
+// Menu item refs travel through XPLM as void*; these are the values we pass.
+static constexpr intptr_t kMenuItemToggle = 1;
+static constexpr intptr_t kMenuItemAbout  = 2;
+
 static void PluginMenuHandler(void *, void *item_ref)
 {
-    if (reinterpret_cast<intptr_t>(item_ref) == 1)
+    switch (reinterpret_cast<intptr_t>(item_ref))
+    {
+    case kMenuItemToggle:
         ui::toggle();
+        break;
+    case kMenuItemAbout:
+        ui::toggle_about();
+        break;
+    default:
+        break;
+    }
 }
 
 static int CmdToggle(XPLMCommandRef, XPLMCommandPhase phase, void *)
@@ -162,7 +175,12 @@ PLUGIN_API int XPluginStart(char *outName, char *outSig, char *outDesc)
         XPLMMenuID plugins_menu = XPLMFindPluginsMenu();
         int        sub          = XPLMAppendMenuItem(plugins_menu, "DataRef Detective", nullptr, 0);
         s_plugin_menu           = XPLMCreateMenu("DataRef Detective", plugins_menu, sub, PluginMenuHandler, nullptr);
-        XPLMAppendMenuItem(s_plugin_menu, "Open / Close Window", reinterpret_cast<void *>(1), 0);
+        // XPLM hands item refs back verbatim; they are tags, never dereferenced.
+        // NOLINTBEGIN(performance-no-int-to-ptr)
+        XPLMAppendMenuItem(s_plugin_menu, "Open / Close Window", reinterpret_cast<void *>(kMenuItemToggle), 0);
+        XPLMAppendMenuSeparator(s_plugin_menu);
+        XPLMAppendMenuItem(s_plugin_menu, "About...", reinterpret_cast<void *>(kMenuItemAbout), 0);
+        // NOLINTEND(performance-no-int-to-ptr)
 
         char banner[128];
         snprintf(banner, sizeof(banner), "[xp_sherlock] *** DataRef Detective v%s by thWelly ***\n",

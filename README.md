@@ -314,7 +314,7 @@ score. With no anchors placed, the column reads `--` and coverage is not scored.
 
 ```sh
 make setup        # downloads X-Plane SDK 4.3.0, Dear ImGui 1.91.9,
-                  # nlohmann/json, Catch2 — first run only
+                  # nlohmann/json, Catch2, xp_wellys_about — first run only
 make build        # universal arm64 + x86_64 .xpl
 make test         # SDK-free unit tests for change-detector + correlator
 make install      # codesign + copy to:
@@ -346,6 +346,7 @@ After `make install`, activate the plugin via XLauncher and restart X-Plane.
 src/
   main.cpp              # plugin lifecycle, menu, command
   ui.cpp/.hpp           # ImGui window (mirrors xp_pilot logbook_ui pattern)
+  about_window.cpp/.hpp # "About..." window (shared xp_wellys_about page)
   recorder.cpp/.hpp     # phase state machine, flight-loop sampling
   dataref_index.cpp/.hpp# SDK enumeration, type info, array expansion, R/W
   correlator.cpp/.hpp   # PURE ranking — zero SDK, fully unit-testable

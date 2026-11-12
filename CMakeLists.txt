@@ -43,6 +43,15 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_opengl2.cpp
 )
 
+# ── xp_wellys_about (downloaded by `make setup` into vendor/xp_wellys_about) ──
+# The "About the developer" page shared by all of thWelly's plugins.
+# Plugin-only: about_photo.cpp uploads an OpenGL texture via XPLMGraphics.
+set(ABOUT_DIR ${CMAKE_SOURCE_DIR}/vendor/xp_wellys_about)
+set(ABOUT_SOURCES
+    ${ABOUT_DIR}/src/about_view.cpp
+    ${ABOUT_DIR}/src/about_photo.cpp
+)
+
 # ── Plugin target ─────────────────────────────────────────────────────────────
 add_library(xp_sherlock_dataref MODULE
     src/main.cpp
@@ -53,13 +62,17 @@ add_library(xp_sherlock_dataref MODULE
     src/correlator.cpp
     src/ui.cpp
     src/clipboard.cpp
+    src/about_window.cpp
     ${IMGUI_SOURCES}
+    ${ABOUT_SOURCES}
 )
 
 target_include_directories(xp_sherlock_dataref PRIVATE
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
 )
+# Vendored About page as SYSTEM so -Wall/-Wextra and clang-tidy skip it.
+target_include_directories(xp_sherlock_dataref SYSTEM PRIVATE ${ABOUT_DIR}/src)
 
 file(READ "${CMAKE_SOURCE_DIR}/VERSION.txt" XP_SHERLOCK_VERSION)
 string(STRIP "${XP_SHERLOCK_VERSION}" XP_SHERLOCK_VERSION)

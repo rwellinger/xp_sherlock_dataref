@@ -38,6 +38,10 @@ void draw();
 void toggle();
 bool is_open();
 
+// Opens/closes the shared "About the developer" window. Independent of the
+// main window: either can be open without the other.
+void toggle_about();
+
 // Force a fresh enumeration of datarefs + commands (same as the "Re-enumerate"
 // button), honouring the active snapshot filters. Called on aircraft load so a
 // newly swapped plane's lazily-registered refs/commands become visible without

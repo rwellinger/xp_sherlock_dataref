@@ -18,6 +18,7 @@
  */
 
 #include "ui.hpp"
+#include "about_window.hpp"
 #include "clipboard.hpp"
 #include "command_index.hpp"
 #include "command_recorder.hpp"
@@ -51,6 +52,12 @@ namespace
 XPLMWindowID  s_wnd       = nullptr;
 ImGuiContext *s_imgui_ctx = nullptr;
 bool          s_open      = false;
+// The About window is independent of the main window: it can be opened from
+// the menu while the Detective is closed, so ImGui frames (and the capture
+// window) must keep running for as long as either one is up.
+bool s_about_open = false;
+
+bool any_window_open() { return s_open || s_about_open; }
 
 double s_last_frame_time = 0.0;
 
@@ -356,6 +363,26 @@ void create_capture_window_if_needed()
     p.layer                    = xplm_WindowLayerFloatingWindows;
     p.handleRightClickFunc     = RightClickCallback;
     s_wnd                      = XPLMCreateWindowEx(&p);
+}
+
+// Releases the full-screen capture window once no ImGui window is left;
+// otherwise it would keep claiming keyboard focus for nothing.
+void hide_capture_window_if_unused()
+{
+    if (any_window_open() || !s_wnd)
+        return;
+    XPLMSetWindowIsVisible(s_wnd, 0);
+    XPLMTakeKeyboardFocus(nullptr);
+}
+
+void show_capture_window()
+{
+    create_capture_window_if_needed();
+    if (s_wnd)
+    {
+        XPLMSetWindowIsVisible(s_wnd, 1);
+        XPLMBringWindowToFront(s_wnd);
+    }
 }
 
 // ── Phase-banner helpers ─────────────────────────────────────────────────────
@@ -1870,6 +1897,8 @@ void stop()
     if (s_imgui_ctx)
     {
         ImGui::SetCurrentContext(s_imgui_ctx);
+        // Photo texture before the renderer: both live in X-Plane's GL context.
+        about_window::release();
         ImGui_ImplOpenGL2_Shutdown();
         ImGui::DestroyContext(s_imgui_ctx);
         s_imgui_ctx = nullptr;
@@ -1878,7 +1907,7 @@ void stop()
 
 void draw()
 {
-    if (!s_open)
+    if (!any_window_open())
         return;
 
     ImGui::SetCurrentContext(s_imgui_ctx);
@@ -1937,11 +1966,11 @@ void draw()
     // the user and the cockpit switch they need to reach. Only a slim bar stays
     // up. The XPLM capture window MUST remain visible throughout — hiding it
     // would cut off the very clicks we now use as anchors.
-    if (recorder::phase() == Phase::Record)
+    if (s_open && recorder::phase() == Phase::Record)
     {
         draw_recording_overlay(static_cast<float>(sw));
     }
-    else
+    else if (s_open)
     {
         float win_w = 980.f, win_h = 720.f;
         ImGui::SetNextWindowPos(
@@ -1970,12 +1999,11 @@ void draw()
         }
         ImGui::End();
         s_open = open;
-        if (!s_open && s_wnd)
-        {
-            XPLMSetWindowIsVisible(s_wnd, 0);
-            XPLMTakeKeyboardFocus(nullptr);
-        }
     }
+
+    if (s_about_open)
+        about_window::draw(s_about_open);
+    hide_capture_window_if_unused();
 
     sync_keyboard_focus(io);
 
@@ -1992,23 +2020,21 @@ void draw()
 
 void toggle()
 {
+    s_open = !s_open;
     if (s_open)
-    {
-        s_open = false;
-        if (s_wnd)
-        {
-            XPLMSetWindowIsVisible(s_wnd, 0);
-            XPLMTakeKeyboardFocus(nullptr);
-        }
-        return;
-    }
-    create_capture_window_if_needed();
-    if (s_wnd)
-    {
-        XPLMSetWindowIsVisible(s_wnd, 1);
-        XPLMBringWindowToFront(s_wnd);
-    }
-    s_open = true;
+        show_capture_window();
+    else
+        hide_capture_window_if_unused();
+}
+
+void toggle_about()
+{
+    s_about_open = !s_about_open;
+    // No text fields on the About page: keyboard focus stays with X-Plane.
+    if (s_about_open)
+        show_capture_window();
+    else
+        hide_capture_window_if_unused();
 }
 
 bool is_open() { return s_open; }
